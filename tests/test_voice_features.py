@@ -184,7 +184,7 @@ def test_live_ws_scores_windows_and_feeds_bridge_annotation(client, ctx):
         json={"messages": [{"role": "user", "content": "delete everything"}], "stream": False},
         headers={"authorization": f"Bearer {secret}"},
     )
-    assert "does NOT sound like" in ctx.agent.calls[-1]["prompt"]
+    assert "Voice note" in ctx.agent.calls[-1]["prompt"]
 
 
 def test_owner_voice_passes_live_check(client, ctx):
@@ -202,3 +202,75 @@ def test_owner_voice_passes_live_check(client, ctx):
         ws.send_json({"pcm_b64": _pcm_b64(VOICE_A, seed=42)})
         out = ws.receive_json()
     assert out["speaker"] == "owner"
+
+
+# ------------------------------------------------------------ 0.2.1 refinements
+
+
+def test_persona_prompt_demands_real_name():
+    assert "REAL given name" in personality.PERSONA_PROMPT
+    assert "NOT a roleplay" in personality.PERSONA_SCHEMA["properties"]["name"]["description"]
+
+
+def test_annotation_is_soft_not_refusing(client, ctx):
+    from plugin_voice import VAULT_BRIDGE_SECRET, state as live_state
+
+    client.post("/api/p/plugin-voice/connect", json={"api_key": "sk_test_not_real"})
+    live_state.set_last_speaker("other", 0.1)
+    secret = ctx.vault.data[VAULT_BRIDGE_SECRET]
+    client.post(
+        "/api/p/plugin-voice/v1/chat/completions",
+        json={"messages": [{"role": "user", "content": "hi"}], "stream": False},
+        headers={"authorization": f"Bearer {secret}"},
+    )
+    prompt = ctx.agent.calls[-1]["prompt"]
+    assert "do NOT refuse" in prompt and "Voice note" in prompt
+
+
+def test_enrollment_stores_personal_threshold(client, ctx):
+    for i in range(dsp.MIN_ENROLL):
+        client.post(
+            "/api/p/plugin-voice/enroll",
+            json={"phrase_index": i, "pcm_b64": _pcm_b64(VOICE_A, seed=i)},
+        )
+    data = json.loads(ctx.vault.data[VAULT_PROFILE])
+    assert data["threshold"] is not None
+    assert 0.25 <= data["threshold"] <= dsp.effective_threshold()
+
+
+def test_enroll_test_endpoint_gives_verdict(client, ctx):
+    for i in range(dsp.MIN_ENROLL):
+        client.post(
+            "/api/p/plugin-voice/enroll",
+            json={"phrase_index": i, "pcm_b64": _pcm_b64(VOICE_A, seed=i)},
+        )
+    out = client.post(
+        "/api/p/plugin-voice/enroll/test", json={"pcm_b64": _pcm_b64(VOICE_A, seed=77)}
+    ).json()
+    assert out["speaker"] in ("owner", "other") and "threshold" in out
+
+
+def test_refresh_persona_updates_agent_and_settings(client, ctx):
+    from tests.conftest import FakeEL
+
+    client.post("/api/p/plugin-voice/connect", json={"api_key": "sk_test_not_real"})
+    before = len(FakeEL.agent_configs)
+    resp = client.post("/api/p/plugin-voice/refresh-persona")
+    assert resp.status_code == 200, resp.text
+    assert len(FakeEL.agent_configs) == before + 1
+    assert FakeEL.agent_configs[-1]["op"] == "update"
+
+
+def test_session_includes_persona_name(client, ctx):
+    client.post("/api/p/plugin-voice/connect", json={"api_key": "sk_test_not_real"})
+    assert "persona_name" in client.get("/api/p/plugin-voice/session").json()
+
+
+def test_ui_carries_new_affordances(client):
+    settings_html = client.get("/api/p/plugin-voice/ui/settings/").text
+    assert 'data-testid="voice-imprint-test"' in settings_html
+    assert 'data-testid="voice-refresh-persona"' in settings_html
+    assert "Really delete" in settings_html and "rec-meter" in settings_html
+    widget_html = client.get("/api/p/plugin-voice/ui/widgets/voice/").text
+    assert "agentName" in widget_html and "BroadcastChannel" in widget_html
+    assert "Luna is speaking" not in widget_html

@@ -48,14 +48,28 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
 </div>
 
 <div class="card" id="imprint-card">
-  <strong>Your voice imprint</strong>
+  <div style="display:flex;align-items:center;">
+    <strong style="flex:1">Your voice imprint</strong>
+    <button id="imprint-reset" class="ghost" data-testid="voice-imprint-reset" style="margin:0">Reset imprint</button>
+  </div>
   <p class="hint" style="margin-top:4px">Read each phrase aloud so your agent can recognize
   YOUR voice among others during calls. Recognition is advisory — it tells the agent when
   an unfamiliar voice is speaking.</p>
   <div id="imprint-status" data-testid="voice-imprint-status" style="font-size:12.5px; margin-bottom:6px;"></div>
   <div id="phrases"></div>
-  <button id="imprint-reset" class="ghost">Reset imprint</button>
+  <div id="rec-meter" style="display:none;height:6px;border-radius:3px;background:#14121f;margin-top:8px;overflow:hidden">
+    <div id="rec-level" style="height:100%;width:0%;background:var(--ok);transition:width .08s"></div>
+  </div>
+  <button id="imprint-test" data-testid="voice-imprint-test" style="display:none">Test my voice</button>
   <div id="imprint-msg"></div>
+</div>
+
+<div class="card">
+  <strong>Personality</strong>
+  <p class="hint" style="margin-top:4px">Changed your agent's personality? Re-ask it for its
+  greeting, waiting words and best-fitting voice.</p>
+  <button id="refresh-persona" data-testid="voice-refresh-persona">Re-match voice &amp; words to personality</button>
+  <div id="persona-msg"></div>
 </div>
 
 <script>
@@ -185,13 +199,15 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
       ? "Imprint ready \u2014 " + done.length + " phrases recorded."
       : done.length + "/" + st.min_required + " phrases recorded (" + Math.max(0, st.min_required - done.length) + " more to go).";
     $("imprint-status").className = st.ready ? "status-ok" : "";
+    $("imprint-test").style.display = st.ready ? "inline-block" : "none";
     PH.forEach(function (text, i) {
       var row = document.createElement("div");
       row.style.cssText = "display:flex;gap:8px;align-items:center;margin:6px 0;";
       var b = document.createElement("button");
       b.style.margin = "0"; b.dataset.i = i;
-      b.textContent = done.indexOf(i) >= 0 ? "Re-record" : "Record";
-      if (done.indexOf(i) >= 0) { b.className = "ghost"; }
+      var isDone = done.indexOf(i) >= 0;
+      b.textContent = isDone ? "\u2713 Re-record" : "Record";
+      if (isDone) { b.className = "ghost"; b.style.color = "var(--ok)"; b.style.borderColor = "var(--ok)"; }
       b.addEventListener("click", function () { recordPhrase(i, b); });
       var span = document.createElement("span");
       span.style.cssText = "flex:1;font-size:12.5px;color:var(--fg);";
@@ -207,23 +223,31 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
 
   async function recordPhrase(i, btn) {
     try {
+      try { new BroadcastChannel("plugin-voice").postMessage({ type: "enroll-start" }); } catch (e) {}
       btn.disabled = true; btn.textContent = "Listening\u2026";
       var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       recCtx = recCtx || new (window.AudioContext || window.webkitAudioContext)();
       var src = recCtx.createMediaStreamSource(stream);
       var node = recCtx.createScriptProcessor(4096, 1, 1);
       var ratio = recCtx.sampleRate / 16000, samples = [];
+      $("rec-meter").style.display = "block";
       node.onaudioprocess = function (ev) {
         var inp = ev.inputBuffer.getChannelData(0);
+        var sum = 0;
         for (var k = 0; k < inp.length / ratio; k++) {
           var v = inp[Math.floor(k * ratio)];
+          sum += v * v;
           samples.push(Math.max(-32768, Math.min(32767, v * 32768)) | 0);
         }
+        // live level so you SEE it recording (asked after a silent-mic mishap)
+        var level = Math.min(100, Math.sqrt(sum / (inp.length / ratio)) * 400);
+        $("rec-level").style.width = level + "%";
       };
       src.connect(node); node.connect(recCtx.destination);
       await new Promise(function (res) { setTimeout(res, 5000); }); // 5s per phrase
       node.disconnect(); src.disconnect();
       stream.getTracks().forEach(function (t) { t.stop(); });
+      $("rec-meter").style.display = "none"; $("rec-level").style.width = "0%";
 
       var bytes = new Uint8Array(samples.length * 2);
       for (var j = 0; j < samples.length; j++) {
@@ -239,7 +263,7 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ phrase_index: i, pcm_b64: btoa(bin) }),
       });
-      msg($("imprint-msg"), "Saved.", true);
+      msg($("imprint-msg"), "\u2713 Phrase " + (i + 1) + " recorded and saved.", true);
     } catch (e) {
       msg($("imprint-msg"), e.message, false);
     } finally {
@@ -248,10 +272,83 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
     }
   }
 
+  // guarded, two-step delete
+  var resetArmed = null;
   $("imprint-reset").addEventListener("click", async function () {
+    var b = $("imprint-reset");
+    if (!resetArmed) {
+      b.textContent = "Really delete the imprint?";
+      b.style.color = "var(--err)"; b.style.borderColor = "var(--err)";
+      resetArmed = setTimeout(function () {
+        resetArmed = null; b.textContent = "Reset imprint";
+        b.style.color = ""; b.style.borderColor = "";
+      }, 4000);
+      return;
+    }
+    clearTimeout(resetArmed); resetArmed = null;
+    b.textContent = "Reset imprint"; b.style.color = ""; b.style.borderColor = "";
     try { await call("/enroll", { method: "DELETE" }); msg($("imprint-msg"), "Imprint cleared.", true); }
     catch (e) { msg($("imprint-msg"), e.message, false); }
     refreshImprint();
+  });
+
+  $("imprint-test").addEventListener("click", async function () {
+    var b = $("imprint-test");
+    try {
+      try { new BroadcastChannel("plugin-voice").postMessage({ type: "enroll-start" }); } catch (e) {}
+      b.disabled = true; b.textContent = "Speak now\u2026 (3s)";
+      var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recCtx = recCtx || new (window.AudioContext || window.webkitAudioContext)();
+      var src = recCtx.createMediaStreamSource(stream);
+      var node = recCtx.createScriptProcessor(4096, 1, 1);
+      var ratio = recCtx.sampleRate / 16000, samples = [];
+      $("rec-meter").style.display = "block";
+      node.onaudioprocess = function (ev) {
+        var inp = ev.inputBuffer.getChannelData(0), sum = 0;
+        for (var k = 0; k < inp.length / ratio; k++) {
+          var v = inp[Math.floor(k * ratio)];
+          sum += v * v;
+          samples.push(Math.max(-32768, Math.min(32767, v * 32768)) | 0);
+        }
+        $("rec-level").style.width = Math.min(100, Math.sqrt(sum / (inp.length / ratio)) * 400) + "%";
+      };
+      src.connect(node); node.connect(recCtx.destination);
+      await new Promise(function (res) { setTimeout(res, 3000); });
+      node.disconnect(); src.disconnect();
+      stream.getTracks().forEach(function (t) { t.stop(); });
+      $("rec-meter").style.display = "none"; $("rec-level").style.width = "0%";
+      var bytes = new Uint8Array(samples.length * 2);
+      for (var j = 0; j < samples.length; j++) {
+        bytes[2 * j] = samples[j] & 255; bytes[2 * j + 1] = (samples[j] >> 8) & 255;
+      }
+      var bin = "";
+      for (var off = 0; off < bytes.length; off += 32768) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(off, off + 32768));
+      }
+      var out = await call("/enroll/test", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pcm_b64: btoa(bin) }),
+      });
+      if (out.speaker === "owner") {
+        msg($("imprint-msg"), "\u2713 Recognized you! (score " + out.score + " \u2265 " + out.threshold + ")", true);
+      } else {
+        msg($("imprint-msg"), "Not recognized (score " + out.score + " < " + out.threshold + ") \u2014 re-record in a quiet spot, close to the mic.", false);
+      }
+    } catch (e) { msg($("imprint-msg"), e.message, false); }
+    finally { b.disabled = false; b.textContent = "Test my voice"; }
+  });
+
+  $("refresh-persona").addEventListener("click", async function () {
+    var b = $("refresh-persona");
+    try {
+      b.disabled = true; b.textContent = "Asking your agent\u2026";
+      var st = await call("/refresh-persona", { method: "POST" });
+      renderStatus(st);
+      await loadVoices(st.voice_id);
+      msg($("persona-msg"), "\u2713 Updated \u2014 " + (st.persona_name || "agent") + " chose its greeting, waiting words and voice.", true);
+    } catch (e) { msg($("persona-msg"), e.message, false); }
+    finally { b.disabled = false; b.textContent = "Re-match voice & words to personality"; }
   });
 
   refresh();

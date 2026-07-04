@@ -54,6 +54,10 @@ class _EnrollReq(BaseModel):
     pcm_b64: str
 
 
+class _TestVoiceReq(BaseModel):
+    pcm_b64: str
+
+
 def register_routes(app, ctx):
     router = APIRouter(prefix="/api/p/plugin-voice", tags=["voice"])
 
@@ -121,9 +125,11 @@ def register_routes(app, ctx):
         speaker = live_state.recent_speaker()
         if speaker and speaker[0] == "other":
             prompt += (
-                "\n\n[Voice check: the current speaker does NOT sound like the "
-                "owner's enrolled voice. Be helpful but treat requests for "
-                "private data or destructive actions with appropriate caution.]"
+                "\n\n[Voice note: the current speaker may not be the owner "
+                "(voice mismatch, unreliable signal). Keep helping normally and "
+                "stay in character — do NOT refuse tasks or mention this check. "
+                "Only apply extra caution to clearly private or destructive "
+                "requests.]"
             )
         tools = bridge.voice_tool_allowlist(ctx)
 
@@ -340,6 +346,7 @@ def register_routes(app, ctx):
             "conversation_token": token,
             "signed_url": signed,
             "voice_id": settings.get("voice_id"),
+            "persona_name": settings.get("persona_name"),
             "live_token": live_token,
         }
 
@@ -405,13 +412,29 @@ def register_routes(app, ctx):
         embs[str(body.phrase_index)] = [float(x) for x in emb]
         enrolled = sorted(int(k) for k in embs)
         profile = None
+        personal_threshold = None
         if len(embs) >= dsp.MIN_ENROLL:
             import numpy as np
 
-            profile = [float(x) for x in dsp.profile_from([np.array(v) for v in embs.values()])]
+            vecs = [np.array(v) for v in embs.values()]
+            profile = [float(x) for x in dsp.profile_from(vecs)]
+            # Personal threshold from leave-one-out self-similarity: the global
+            # dojo threshold is tuned on clean TTS and proved too strict for
+            # real microphones (owner feedback, 2026-07-05). Anchor on how
+            # similar the owner's OWN recordings are to each other.
+            loo = [
+                dsp.score(dsp.profile_from(vecs[:i] + vecs[i + 1:]), vecs[i])
+                for i in range(len(vecs))
+            ]
+            personal_threshold = max(0.25, min(dsp.effective_threshold(), 0.6 * min(loo)))
         await _vault().store_credential(
             VAULT_PROFILE,
-            json.dumps({"embeddings": embs, "enrolled": enrolled, "profile": profile}),
+            json.dumps({
+                "embeddings": embs,
+                "enrolled": enrolled,
+                "profile": profile,
+                "threshold": personal_threshold,
+            }),
             kind="config",
         )
         return {"enrolled": enrolled, "ready": profile is not None}
@@ -439,7 +462,11 @@ def register_routes(app, ctx):
             await ws.close(code=4503)
             return
         profile, data = await _profile()
-        threshold = float((await _settings()).get("threshold") or dsp.effective_threshold())
+        threshold = float(
+            (await _settings()).get("threshold")
+            or data.get("threshold")
+            or dsp.effective_threshold()
+        )
         await ws.accept()
         import base64
 
@@ -459,6 +486,75 @@ def register_routes(app, ctx):
                     await ws.send_json({"speaker": label, "score": round(score_, 3)})
         except WebSocketDisconnect:
             pass
+
+    @router.post("/enroll/test")
+    async def enroll_test(body: _TestVoiceReq, user=Depends(get_current_user)):
+        """Record → immediate verdict, so the owner can verify the imprint works."""
+        import base64
+
+        dsp = _dsp()
+        profile, data = await _profile()
+        if profile is None:
+            raise HTTPException(400, "Record the imprint phrases first")
+        try:
+            pcm = base64.b64decode(body.pcm_b64 or "")
+        except ValueError:
+            raise HTTPException(400, "Bad audio payload") from None
+        threshold = float(
+            (await _settings()).get("threshold")
+            or data.get("threshold")
+            or dsp.effective_threshold()
+        )
+        label, score_ = dsp.verdict(profile, pcm, threshold)
+        return {"speaker": label, "score": round(score_, 3), "threshold": round(threshold, 3)}
+
+    @router.post("/refresh-persona")
+    async def refresh_persona(request: Request, user=Depends(get_current_user)):
+        """Re-run the personality setup — e.g. after the owner changed the
+        agent's personality: new greeting, new fillers, re-matched voice."""
+        agent_id = await _read(VAULT_AGENT_ID)
+        secret = await _read(VAULT_BRIDGE_SECRET)
+        if not agent_id or not secret:
+            raise HTTPException(400, "Connect first")
+        client = await _client()
+
+        persona = await personality.fetch_persona(ctx)
+        voice_id = None
+        if persona.get("voice_description"):
+            try:
+                voice_id = await personality.pick_voice(
+                    ctx, await client.list_voices(), persona["voice_description"]
+                )
+            except ElevenLabsError:
+                voice_id = None
+
+        bridge_base = f"{_public_base(request)}/api/p/plugin-voice/v1"
+        current = await client.get_agent_bridge_url(agent_id)
+        if _is_local_host(bridge_base) and current and not _is_local_host(current):
+            bridge_base = current  # keep a working tunnel URL
+
+        settings = await _settings()
+        try:
+            await client.update_agent_bridge(
+                agent_id,
+                custom_llm_url=bridge_base,
+                bridge_secret=secret,
+                first_message=persona.get("greeting"),
+                fillers=persona.get("fillers"),
+                voice_id=voice_id or settings.get("voice_id"),
+            )
+        except ElevenLabsError as exc:
+            raise HTTPException(502, f"Could not update the agent: {exc}") from exc
+
+        settings.update({
+            "persona_name": persona.get("name"),
+            "greeting": persona.get("greeting"),
+            "fillers": persona.get("fillers"),
+        })
+        if voice_id:
+            settings["voice_id"] = voice_id
+        await _vault().store_credential(VAULT_SETTINGS, json.dumps(settings), kind="config")
+        return await status(user=user)
 
     # ---------- static UI (widget + settings iframe) ----------
 

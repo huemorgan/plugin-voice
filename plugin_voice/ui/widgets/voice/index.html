@@ -63,6 +63,7 @@
   var endBtn = document.getElementById("end");
 
   var convo = null;          // live Conversation session
+  var agentName = "Agent";   // replaced by persona_name from /session
   var mode = "idle";         // idle | connecting | listening | thinking | speaking | error
   var lastUserSpokeAt = 0;
 
@@ -170,7 +171,7 @@
       if (!u) { try { u = num(convo.getInputVolume && convo.getInputVolume()); } catch (e) {} }
       try { l = num(convo.getOutputVolume && convo.getOutputVolume()); } catch (e) {}
     }
-    // fallback: SDK says Luna is speaking but exposes no level → synth a pulse
+    // fallback: SDK says the agent is speaking but exposes no level → synth a pulse
     if (!l && mode === "speaking") { l = 0.25 + 0.2 * Math.abs(Math.sin(Date.now() * 0.006)); }
     if (u > 0.04) { lastUserSpokeAt = Date.now(); }
     userHist.push(Math.min(1, u)); userHist.shift();
@@ -236,8 +237,8 @@
   }
 
   function syncStatus() {
-    if (mode === "speaking") setStatus("Luna is speaking — interrupt anytime");
-    else if (mode === "thinking") setStatus("Luna is thinking…");
+    if (mode === "speaking") setStatus(agentName + " is speaking — interrupt anytime");
+    else if (mode === "thinking") setStatus(agentName + " is thinking…");
     else if (mode === "listening") setStatus("Listening…");
   }
 
@@ -294,6 +295,7 @@
         throw new Error(detail);
       }
       var s = await resp.json();
+      if (s.persona_name) { agentName = s.persona_name; }
       var opts = {
         onModeChange: function (m) {
           if (m && m.mode === "speaking") setMode("speaking");
@@ -330,6 +332,16 @@
     setMode("idle"); setLive(false); setStatus("");
     if (c && !passive) { try { await c.endSession(); } catch (e) {} }
   }
+
+  try {
+    var bc = new BroadcastChannel("plugin-voice");
+    bc.onmessage = function (e) {
+      if (e.data && e.data.type === "enroll-start" && convo) {
+        stop();
+        setStatus("Paused for voice imprint recording");
+      }
+    };
+  } catch (e) { /* older browsers: no channel, no pause */ }
 
   endBtn.addEventListener("click", function () { stop(); });
   cta.addEventListener("click", start);

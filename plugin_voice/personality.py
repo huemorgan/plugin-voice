@@ -18,7 +18,14 @@ log = logging.getLogger("plugin-voice.personality")
 PERSONA_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "name": {"type": "string", "description": "Your name, as you call yourself"},
+        "name": {
+            "type": "string",
+            "description": (
+                "Your REAL configured name — the name your owner gave you and "
+                "calls you (your identity name), NOT a roleplay character or "
+                "persona you may currently be playing."
+            ),
+        },
         "greeting": {
             "type": "string",
             "description": (
@@ -48,8 +55,10 @@ PERSONA_SCHEMA: dict[str, Any] = {
 
 PERSONA_PROMPT = (
     "You are being connected to a real-time VOICE interface. Answer with JSON "
-    "describing how you should sound. Stay fully in character — your actual "
-    "name and personality, not a generic assistant."
+    "describing how you should sound. Use your REAL given name (the identity "
+    "name your owner configured, e.g. what they call you in chat) — never a "
+    "roleplay/persona character name. Greeting and fillers should still carry "
+    "your personality and current character."
 )
 
 NEUTRAL = {
