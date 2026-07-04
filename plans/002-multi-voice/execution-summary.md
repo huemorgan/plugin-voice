@@ -18,6 +18,19 @@
 > real name, not "Luna". (7) New `/refresh-persona` + settings button re-runs
 > the personality setup (greeting/fillers/voice) after a personality change.
 > 61 tests green.
+>
+> **0.2.2 (tools round):** voice turns couldn't send chat messages or save
+> playbooks — both blocked by OUR allowlist, not Luna. `send_chat_message`
+> (auto_approve/low, defaults to the most recent conversation) was excluded on
+> plugin-whatsapp's double-post rationale, which doesn't apply to spoken
+> replies — now allowed. All `playbook_*` tools are `policy="prompt_always"`
+> and were dropped wholesale; now low/medium-risk prompt_always tools are
+> allowed while the voice imprint verifies the OWNER is speaking (the imprint
+> is the voice channel's approval mechanism) and dropped for unrecognized
+> voices; high-risk always excluded. Verified live: a voice turn posted into
+> the owner's chat and listed their real playbooks. Debug lesson repeated:
+> `~/.luna/managed_plugins/` shadows in-tree symlinks — a test instance ran
+> stale plugin code until the managed copy was rsynced. 62 tests green.
 
 ## What was accomplished
 
