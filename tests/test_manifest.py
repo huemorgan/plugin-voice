@@ -22,7 +22,7 @@ def _manifest():
 def test_toml_and_manifest_agree():
     toml, manifest = _toml(), _manifest()
     assert toml["name"] == manifest.name == "plugin-voice"
-    assert toml["version"] == manifest.version == "0.2.1"
+    assert toml["version"] == manifest.version == "0.2.2"
     assert toml["entry"] == "plugin_voice"
     assert toml["description"] == manifest.description
 

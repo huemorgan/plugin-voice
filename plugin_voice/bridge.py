@@ -45,20 +45,27 @@ VOICE_SYSTEM_PROMPT = (
     "take a while, say so briefly and give the short version first."
 )
 
-# Tools a voice turn must NOT get. run_turn does not enforce approval policy
-# (same caveat plugin-whatsapp documents), so anything that would normally
-# prompt the user has no gate here — exclude by name AND by def policy/risk.
-TOOL_EXCLUDE = {"send_chat_message"}
+# Tools a voice turn must NOT get, by name. run_turn does not enforce approval
+# policy (same caveat plugin-whatsapp documents) — the def-level rules below
+# are the real gate. send_chat_message is deliberately ALLOWED: unlike the
+# WhatsApp channel (where the reply itself is delivered, so it double-posts),
+# a voice reply is spoken — posting into the web chat is complementary
+# ("send that to my chat").
+TOOL_EXCLUDE: set[str] = set()
 
 
-def voice_tool_allowlist(ctx: Any) -> list[str] | None:
+def voice_tool_allowlist(ctx: Any, *, owner_verified: bool = True) -> list[str] | None:
     """Every registered tool minus unsafe-for-voice ones.
 
-    Excludes by def when the registry exposes defs: ``risk_level="high"`` and
-    ``policy="prompt_always"`` tools are dropped (no approval UX exists on a
-    voice turn). Falls back to name-only exclusion, then to ``None`` (all
-    tools — run_turn still filters chat_only/skill_gated) if the registry
-    can't be introspected, so a reply is never blocked by introspection.
+    Rules (run_turn bypasses approval UX, so this list IS the gate):
+    - ``risk_level="high"`` tools are always dropped.
+    - ``policy="prompt_always"`` tools (playbook save/run, etc.) are allowed
+      while the live voice check says the OWNER is speaking (or no imprint is
+      enrolled — same trust as their open chat on their machine), and dropped
+      while an unrecognized voice is talking.
+    Falls back to ``None`` (all tools — run_turn still filters
+    chat_only/skill_gated) if the registry can't be introspected, so a reply
+    is never blocked by introspection.
     """
     reg = getattr(ctx, "tool_registry", None)
     items: list[Any] | None = None
@@ -83,7 +90,7 @@ def voice_tool_allowlist(ctx: Any) -> list[str] | None:
             continue
         if getattr(tool_def, "risk_level", None) == "high":
             continue
-        if getattr(tool_def, "policy", None) == "prompt_always":
+        if getattr(tool_def, "policy", None) == "prompt_always" and not owner_verified:
             continue
         allowed.append(name)
     return allowed or None

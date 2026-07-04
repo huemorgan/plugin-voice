@@ -123,7 +123,8 @@ def register_routes(app, ctx):
 
         prompt = bridge.build_prompt(messages)
         speaker = live_state.recent_speaker()
-        if speaker and speaker[0] == "other":
+        owner_verified = not (speaker and speaker[0] == "other")
+        if not owner_verified:
             prompt += (
                 "\n\n[Voice note: the current speaker may not be the owner "
                 "(voice mismatch, unreliable signal). Keep helping normally and "
@@ -131,7 +132,14 @@ def register_routes(app, ctx):
                 "Only apply extra caution to clearly private or destructive "
                 "requests.]"
             )
-        tools = bridge.voice_tool_allowlist(ctx)
+        tools = bridge.voice_tool_allowlist(ctx, owner_verified=owner_verified)
+        log.info(
+            "plugin-voice turn: owner_verified=%s tools=%s (chat=%s playbooks=%s)",
+            owner_verified,
+            len(tools) if tools else "ALL",
+            bool(tools and "send_chat_message" in tools),
+            bool(tools and any(t.startswith("playbook_") for t in tools)),
+        )
 
         async def run() -> str:
             try:

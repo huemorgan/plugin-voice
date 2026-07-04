@@ -54,8 +54,20 @@ def test_allowlist_excludes_unsafe_tools():
     allowed = bridge.voice_tool_allowlist(ctx)
     assert "get_weather" in allowed
     assert "restart_service" in allowed  # ask/medium is fine
-    assert "delete_everything" not in allowed  # high risk
-    assert "send_chat_message" not in allowed  # would double-post
+    assert "delete_everything" not in allowed  # high risk stays out
+    assert "send_chat_message" in allowed  # spoken reply + chat post are complementary
+
+
+def test_allowlist_prompt_always_gated_on_owner_voice():
+    ctx = FakeCtx()
+    ctx.tool_registry = FakeToolRegistry(
+        [_RegisteredTool("playbook_propose", policy="prompt_always", risk_level="medium"),
+         _RegisteredTool("get_weather")]
+    )
+    trusted = bridge.voice_tool_allowlist(ctx, owner_verified=True)
+    assert "playbook_propose" in trusted
+    guarded = bridge.voice_tool_allowlist(ctx, owner_verified=False)
+    assert "playbook_propose" not in guarded and "get_weather" in guarded
 
 
 def test_allowlist_falls_back_to_none_without_registry():
@@ -64,12 +76,12 @@ def test_allowlist_falls_back_to_none_without_registry():
     assert bridge.voice_tool_allowlist(ctx) is None
 
 
-def test_allowlist_excludes_prompt_always_even_low_risk():
+def test_allowlist_unverified_voice_drops_prompt_always_low_risk_too():
     ctx = FakeCtx()
     ctx.tool_registry = FakeToolRegistry(
         [_RegisteredTool("confirmy", policy="prompt_always", risk_level="low")]
     )
-    assert bridge.voice_tool_allowlist(ctx) is None  # nothing left → None fallback
+    assert bridge.voice_tool_allowlist(ctx, owner_verified=False) is None
 
 
 # ----------------------------------------------------------------- stream_turn

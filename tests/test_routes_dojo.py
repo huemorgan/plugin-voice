@@ -199,7 +199,8 @@ def test_bridge_nonstream_returns_luna_reply(client, ctx):
     assert body["choices"][0]["message"]["content"] == ctx.agent.reply
     # the turn used a restricted allowlist (unsafe tools stripped)
     tools = ctx.agent.calls[-1]["tools"]
-    assert "delete_everything" not in tools and "send_chat_message" not in tools
+    assert "delete_everything" not in tools      # high risk stays out
+    assert "send_chat_message" in tools          # allowed on voice since 0.2.2
 
 
 def test_bridge_stream_is_sse_with_buffer_words(client, ctx):
