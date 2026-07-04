@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Talk — Settings</title>
+<style>
+  :root { --fg:#e8e6f0; --dim:#8a87a0; --card:#1d1b2a; --line:#2e2b40; --accent:#a78bfa; --ok:#2dd4bf; --err:#f87171; }
+  * { box-sizing: border-box; margin: 0; }
+  body { font: 14px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif; color: var(--fg); background: transparent; padding: 16px; max-width: 640px; }
+  h2 { font-size: 15px; margin-bottom: 4px; }
+  p.hint { color: var(--dim); font-size: 12.5px; margin-bottom: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+  label { display:block; color: var(--dim); font-size: 12px; margin: 8px 0 3px; }
+  input, select { width: 100%; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--line); background: #14121f; color: var(--fg); font-size: 13px; }
+  button { margin-top: 10px; border: 0; border-radius: 7px; background: var(--accent); color: #14121f; font-weight: 600; padding: 7px 14px; cursor: pointer; font-size: 13px; }
+  button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); }
+  .status-ok { color: var(--ok); } .status-err { color: var(--err); }
+  code { background:#14121f; padding: 2px 6px; border-radius: 5px; font-size: 12px; word-break: break-all; }
+  #msg, #voice-msg { font-size: 12.5px; margin-top: 8px; min-height: 16px; }
+  #agent-line { color: var(--dim); font-size: 12px; margin-top: 8px; }
+  audio { width: 100%; margin-top: 8px; height: 32px; }
+</style>
+</head>
+<body>
+<h2>Talk to Luna</h2>
+<p class="hint">Voice runs on ElevenLabs; Luna stays the brain. Audio never touches your Luna server.
+Just paste your ElevenLabs API key — the Luna voice agent is created and wired up automatically.</p>
+
+<div class="card" id="connect-card">
+  <strong id="conn-status" data-testid="voice-conn-status">Checking…</strong>
+  <label>ElevenLabs API key</label>
+  <input id="api-key" data-testid="voice-api-key" type="password" placeholder="sk_…" autocomplete="off" />
+  <button id="connect" data-testid="voice-connect">Connect</button>
+  <button id="disconnect" class="ghost">Disconnect</button>
+  <div id="agent-line" data-testid="voice-agent-line" style="display:none"></div>
+  <div id="msg"></div>
+</div>
+
+<div class="card">
+  <strong>Voice</strong>
+  <label>Voice</label>
+  <select id="voice" data-testid="voice-voice-select"><option value="">Agent default</option></select>
+  <audio id="preview" controls style="display:none"></audio>
+  <button id="save-voice" data-testid="voice-save-voice">Save voice</button>
+  <div id="voice-msg"></div>
+  <div id="persona-line" data-testid="voice-persona" style="color:var(--dim); font-size:12px; margin-top:8px;"></div>
+</div>
+
+<div class="card" id="imprint-card">
+  <strong>Your voice imprint</strong>
+  <p class="hint" style="margin-top:4px">Read each phrase aloud so your agent can recognize
+  YOUR voice among others during calls. Recognition is advisory — it tells the agent when
+  an unfamiliar voice is speaking.</p>
+  <div id="imprint-status" data-testid="voice-imprint-status" style="font-size:12.5px; margin-bottom:6px;"></div>
+  <div id="phrases"></div>
+  <button id="imprint-reset" class="ghost">Reset imprint</button>
+  <div id="imprint-msg"></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var API = "/api/p/plugin-voice";
+  function $(id) { return document.getElementById(id); }
+  function msg(el, text, ok) { el.textContent = text; el.className = ok ? "status-ok" : "status-err"; }
+
+  // ---- auth: Luna's shell hands iframes a bearer token via ?token= (settings
+  // tabs) and/or a {type:'luna-auth', token} postMessage. Cookie auth alone is
+  // read-only, so writes need the token.
+  var token = new URLSearchParams(location.search).get("token") || "";
+  window.addEventListener("message", function (e) {
+    if (e.origin === location.origin && e.data && e.data.type === "luna-auth" && e.data.token) {
+      token = e.data.token;
+    }
+  });
+  try { window.parent.postMessage({ type: "luna-request-auth" }, location.origin); } catch (e) {}
+
+  async function call(path, opts) {
+    opts = Object.assign({ credentials: "include" }, opts || {});
+    opts.headers = Object.assign({}, opts.headers || {});
+    if (token) { opts.headers["Authorization"] = "Bearer " + token; }
+    var resp = await fetch(API + path, opts);
+    var body = null;
+    try { body = await resp.json(); } catch (e) {}
+    if (!resp.ok) {
+      var detail = body && body.detail;
+      if (detail && typeof detail !== "string") { detail = JSON.stringify(detail); }
+      throw new Error(detail || ("HTTP " + resp.status));
+    }
+    return body;
+  }
+
+  function renderStatus(s) {
+    $("conn-status").textContent = s.connected ? "Connected — ready to talk" : "Not connected";
+    $("conn-status").className = s.connected ? "status-ok" : "status-err";
+    var pl = $("persona-line");
+    if (s.persona_name) {
+      pl.textContent = s.persona_name + " set this voice up personally \u2014 greeting: \u201C" + (s.greeting || "") + "\u201D";
+    } else { pl.textContent = ""; }
+    var line = $("agent-line");
+    if (s.connected && s.agent_id) {
+      line.style.display = "block";
+      line.textContent = "ElevenLabs agent: " + s.agent_id + " (auto-managed)";
+    } else {
+      line.style.display = "none";
+    }
+  }
+
+  async function loadVoices(selected) {
+    try {
+      var data = await call("/voices");
+      var sel = $("voice");
+      sel.innerHTML = '<option value="">Agent default</option>';
+      data.voices.forEach(function (v) {
+        var o = document.createElement("option");
+        o.value = v.voice_id;
+        o.textContent = v.name + (v.category ? " (" + v.category + ")" : "");
+        o.dataset.preview = v.preview_url || "";
+        sel.appendChild(o);
+      });
+      if (selected) { sel.value = selected; }
+    } catch (e) { /* not connected yet — picker stays empty */ }
+  }
+
+  async function refresh() {
+    try {
+      var s = await call("/status");
+      renderStatus(s);
+      if (s.connected) { await loadVoices(s.voice_id); }
+    } catch (e) {
+      $("conn-status").textContent = "Status unavailable: " + e.message;
+      $("conn-status").className = "status-err";
+    }
+  }
+
+  $("connect").addEventListener("click", async function () {
+    try {
+      msg($("msg"), "Connecting and provisioning the Luna agent…", true);
+      var s = await call("/connect", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ api_key: $("api-key").value.trim() }),
+      });
+      $("api-key").value = "";
+      renderStatus(s);
+      await loadVoices(s.voice_id);
+      msg($("msg"), "Connected — the widget is ready. Pick a voice below if you like.", true);
+    } catch (e) { msg($("msg"), e.message, false); }
+  });
+
+  $("disconnect").addEventListener("click", async function () {
+    try { renderStatus(await call("/disconnect", { method: "POST" })); msg($("msg"), "Disconnected.", true); }
+    catch (e) { msg($("msg"), e.message, false); }
+  });
+
+  $("voice").addEventListener("change", function () {
+    var opt = this.selectedOptions[0];
+    var url = opt && opt.dataset.preview;
+    var audio = $("preview");
+    if (url) { audio.src = url; audio.style.display = "block"; audio.play().catch(function(){}); }
+    else { audio.pause(); audio.style.display = "none"; }
+  });
+
+  $("save-voice").addEventListener("click", async function () {
+    try {
+      await call("/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ voice_id: $("voice").value || null }),
+      });
+      msg($("voice-msg"), "Saved — applies to the next call.", true);
+    } catch (e) { msg($("voice-msg"), e.message, false); }
+  });
+
+  // ---------------- voice imprint enrollment ----------------
+  var PH = [], recCtx = null;
+
+  function renderPhrases(st) {
+    var box = $("phrases");
+    box.innerHTML = "";
+    PH = st.phrases || [];
+    var done = st.enrolled || [];
+    $("imprint-status").textContent = st.ready
+      ? "Imprint ready \u2014 " + done.length + " phrases recorded."
+      : done.length + "/" + st.min_required + " phrases recorded (" + Math.max(0, st.min_required - done.length) + " more to go).";
+    $("imprint-status").className = st.ready ? "status-ok" : "";
+    PH.forEach(function (text, i) {
+      var row = document.createElement("div");
+      row.style.cssText = "display:flex;gap:8px;align-items:center;margin:6px 0;";
+      var b = document.createElement("button");
+      b.style.margin = "0"; b.dataset.i = i;
+      b.textContent = done.indexOf(i) >= 0 ? "Re-record" : "Record";
+      if (done.indexOf(i) >= 0) { b.className = "ghost"; }
+      b.addEventListener("click", function () { recordPhrase(i, b); });
+      var span = document.createElement("span");
+      span.style.cssText = "flex:1;font-size:12.5px;color:var(--fg);";
+      span.textContent = "\u201C" + text + "\u201D";
+      row.appendChild(b); row.appendChild(span);
+      box.appendChild(row);
+    });
+  }
+
+  async function refreshImprint() {
+    try { renderPhrases(await call("/enroll")); } catch (e) { /* not connected yet */ }
+  }
+
+  async function recordPhrase(i, btn) {
+    try {
+      btn.disabled = true; btn.textContent = "Listening\u2026";
+      var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recCtx = recCtx || new (window.AudioContext || window.webkitAudioContext)();
+      var src = recCtx.createMediaStreamSource(stream);
+      var node = recCtx.createScriptProcessor(4096, 1, 1);
+      var ratio = recCtx.sampleRate / 16000, samples = [];
+      node.onaudioprocess = function (ev) {
+        var inp = ev.inputBuffer.getChannelData(0);
+        for (var k = 0; k < inp.length / ratio; k++) {
+          var v = inp[Math.floor(k * ratio)];
+          samples.push(Math.max(-32768, Math.min(32767, v * 32768)) | 0);
+        }
+      };
+      src.connect(node); node.connect(recCtx.destination);
+      await new Promise(function (res) { setTimeout(res, 5000); }); // 5s per phrase
+      node.disconnect(); src.disconnect();
+      stream.getTracks().forEach(function (t) { t.stop(); });
+
+      var bytes = new Uint8Array(samples.length * 2);
+      for (var j = 0; j < samples.length; j++) {
+        bytes[2 * j] = samples[j] & 255; bytes[2 * j + 1] = (samples[j] >> 8) & 255;
+      }
+      var bin = ""; var CH = 32768;
+      for (var off = 0; off < bytes.length; off += CH) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(off, off + CH));
+      }
+      btn.textContent = "Saving\u2026";
+      await call("/enroll", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ phrase_index: i, pcm_b64: btoa(bin) }),
+      });
+      msg($("imprint-msg"), "Saved.", true);
+    } catch (e) {
+      msg($("imprint-msg"), e.message, false);
+    } finally {
+      btn.disabled = false;
+      refreshImprint();
+    }
+  }
+
+  $("imprint-reset").addEventListener("click", async function () {
+    try { await call("/enroll", { method: "DELETE" }); msg($("imprint-msg"), "Imprint cleared.", true); }
+    catch (e) { msg($("imprint-msg"), e.message, false); }
+    refreshImprint();
+  });
+
+  refresh();
+  refreshImprint();
+})();
+</script>
+</body>
+</html>

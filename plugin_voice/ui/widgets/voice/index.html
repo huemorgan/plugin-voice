@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Talk to Luna</title>
+<style>
+  :root {
+    --fg: #e8e6f0;
+    --dim: #8a87a0;
+    --user: #2dd4bf;   /* teal — the owner's voice */
+    --luna: #a78bfa;   /* violet — Luna's voice */
+    --err: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; background: transparent; overflow: hidden; }
+  body { font: 12px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--fg); position: relative; }
+
+  /* full-bleed canvas — waves own the whole widget, nothing can overflow */
+  #viz { position: absolute; inset: 0; width: 100%; height: 100%; cursor: pointer; }
+
+  /* idle call-to-action, sitting BETWEEN the two waves */
+  #cta {
+    position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%);
+    text-align: center; color: var(--fg); opacity: .85;
+    font-size: 12px; letter-spacing: .06em; cursor: pointer; user-select: none;
+  }
+
+  /* live row: status + End, overlaying the waves */
+  #row {
+    position: absolute; left: 8px; right: 8px; bottom: 4px;
+    display: none; align-items: center; gap: 8px; pointer-events: none;
+  }
+  #row.live { display: flex; }
+  #status { flex: 1; color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status.error { color: var(--err); }
+  #end {
+    border: 1px solid rgba(255,255,255,.7); border-radius: 999px;
+    background: transparent; color: #fff; padding: 1px 12px;
+    font-size: 11px; cursor: pointer; pointer-events: auto;
+  }
+  #end:hover { border-color: #fff; }
+</style>
+</head>
+<body>
+<canvas id="viz" data-testid="voice-viz" title="Talk to Luna"></canvas>
+<div id="cta" data-testid="voice-cta">Start talking</div>
+<div id="row">
+  <span id="who" data-testid="voice-who" style="display:none; font-size:11px; margin-right:2px;"></span>
+  <span id="status" data-testid="voice-status"></span>
+  <button id="end" data-testid="voice-button">End</button>
+</div>
+<script src="elevenlabs-client.js"></script>
+<script>
+(function () {
+  "use strict";
+  var API = "/api/p/plugin-voice";
+  var canvas = document.getElementById("viz");
+  var g = canvas.getContext("2d");
+  var cta = document.getElementById("cta");
+  var row = document.getElementById("row");
+  var statusEl = document.getElementById("status");
+  var endBtn = document.getElementById("end");
+
+  var convo = null;          // live Conversation session
+  var mode = "idle";         // idle | connecting | listening | thinking | speaking | error
+  var lastUserSpokeAt = 0;
+
+  function setStatus(text, isErr) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle("error", !!isErr);
+  }
+
+  function setMode(m) { mode = m; }
+
+  function setLive(live) {
+    row.classList.toggle("live", live);
+    cta.style.display = live ? "none" : "block";
+  }
+
+  // ------------------------------------------------------------------ audio →
+  // The user's side vibrates from OUR OWN AnalyserNode on the mic stream (we
+  // hold the permission anyway), so it reacts to speech no matter what the SDK
+  // exposes. Luna's side uses the SDK's output volume, with a speaking-mode
+  // pulse as fallback.
+  var HIST = 48;
+  var userHist = new Array(HIST).fill(0);
+  var lunaHist = new Array(HIST).fill(0);
+  var micStream = null, analyser = null, analyserBuf = null, audioCtx = null;
+  var liveWs = null, tapNode = null, tapSrc = null;
+  var whoEl = document.getElementById("who");
+
+  function setWho(label) {
+    if (!label || label === "unknown") { whoEl.style.display = "none"; return; }
+    whoEl.style.display = "inline";
+    if (label === "owner") { whoEl.textContent = "\u25CF You"; whoEl.style.color = "#2dd4bf"; }
+    else { whoEl.textContent = "\u25CF Unrecognized voice"; whoEl.style.color = "#fbbf24"; }
+  }
+
+  // stream mic PCM (downsampled to 16k s16le) to the live speaker check
+  function startLiveCheck(liveToken, stream) {
+    if (!liveToken) { return; }
+    try {
+      var proto = location.protocol === "https:" ? "wss://" : "ws://";
+      liveWs = new WebSocket(proto + location.host + API + "/live?token=" + encodeURIComponent(liveToken));
+      liveWs.onmessage = function (e) {
+        try { setWho(JSON.parse(e.data).speaker); } catch (err) {}
+      };
+      liveWs.onerror = function () { try { liveWs.close(); } catch (e) {} liveWs = null; };
+
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      tapSrc = audioCtx.createMediaStreamSource(stream);
+      tapNode = audioCtx.createScriptProcessor(4096, 1, 1);
+      var ratio = audioCtx.sampleRate / 16000, acc = [];
+      tapNode.onaudioprocess = function (ev) {
+        if (!liveWs || liveWs.readyState !== 1) { return; }
+        var inp = ev.inputBuffer.getChannelData(0);
+        for (var i = 0; i < inp.length / ratio; i++) {
+          var v = inp[Math.floor(i * ratio)];
+          acc.push(Math.max(-32768, Math.min(32767, v * 32768)) | 0);
+        }
+        if (acc.length >= 8000) { // 500ms @16k
+          var bytes = new Uint8Array(acc.length * 2);
+          for (var j = 0; j < acc.length; j++) {
+            bytes[2 * j] = acc[j] & 255; bytes[2 * j + 1] = (acc[j] >> 8) & 255;
+          }
+          var bin = ""; for (var k = 0; k < bytes.length; k++) { bin += String.fromCharCode(bytes[k]); }
+          liveWs.send(JSON.stringify({ pcm_b64: btoa(bin) }));
+          acc = [];
+        }
+      };
+      tapSrc.connect(tapNode); tapNode.connect(audioCtx.destination);
+    } catch (e) { /* live check is best-effort */ }
+  }
+
+  function stopLiveCheck() {
+    if (tapNode) { try { tapNode.disconnect(); } catch (e) {} tapNode = null; }
+    if (tapSrc) { try { tapSrc.disconnect(); } catch (e) {} tapSrc = null; }
+    if (liveWs) { try { liveWs.close(); } catch (e) {} liveWs = null; }
+    setWho(null);
+  }
+
+  function attachAnalyser(stream) {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      var src = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyserBuf = new Uint8Array(analyser.frequencyBinCount);
+      src.connect(analyser);
+    } catch (e) { analyser = null; }
+  }
+
+  function micLevel() {
+    if (!analyser) { return 0; }
+    analyser.getByteTimeDomainData(analyserBuf);
+    var sum = 0;
+    for (var i = 0; i < analyserBuf.length; i++) {
+      var d = (analyserBuf[i] - 128) / 128;
+      sum += d * d;
+    }
+    return Math.min(1, Math.sqrt(sum / analyserBuf.length) * 4);
+  }
+
+  function num(v) { return typeof v === "number" && isFinite(v) ? v : 0; }
+
+  function pushVolumes() {
+    var u = micLevel(), l = 0;
+    if (convo) {
+      if (!u) { try { u = num(convo.getInputVolume && convo.getInputVolume()); } catch (e) {} }
+      try { l = num(convo.getOutputVolume && convo.getOutputVolume()); } catch (e) {}
+    }
+    // fallback: SDK says Luna is speaking but exposes no level → synth a pulse
+    if (!l && mode === "speaking") { l = 0.25 + 0.2 * Math.abs(Math.sin(Date.now() * 0.006)); }
+    if (u > 0.04) { lastUserSpokeAt = Date.now(); }
+    userHist.push(Math.min(1, u)); userHist.shift();
+    lunaHist.push(Math.min(1, l)); lunaHist.shift();
+  }
+
+  // ---------------------------------------------------------------- drawing →
+  function sizeCanvas() {
+    var r = canvas.getBoundingClientRect();
+    var dpr = window.devicePixelRatio || 1;
+    canvas.width = r.width * dpr; canvas.height = r.height * dpr;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener("resize", sizeCanvas);
+
+  function wave(hist, color, midY, amp, t, phase) {
+    var w = canvas.getBoundingClientRect().width;
+    g.beginPath();
+    for (var i = 0; i < HIST; i++) {
+      var x = (i / (HIST - 1)) * w;
+      var energy = hist[i];
+      var y = midY +
+        Math.sin(i * 0.55 + t * 0.004 + phase) * (2 + energy * amp) +
+        Math.sin(i * 1.31 + t * 0.007 + phase * 2) * energy * amp * 0.5;
+      i === 0 ? g.moveTo(x, y) : g.lineTo(x, y);
+    }
+    g.strokeStyle = color; g.lineWidth = 1.6; g.globalAlpha = 0.9; g.stroke();
+    g.globalAlpha = 1;
+  }
+
+  // compact 90px widget: waves near the top, CTA between them, row overlays
+  var USER_Y = 0.30, LUNA_Y = 0.70;
+
+  function draw(t) {
+    var r = canvas.getBoundingClientRect();
+    g.clearRect(0, 0, r.width, r.height);
+    var h = r.height;
+
+    if (mode === "idle" || mode === "error") {
+      wave(new Array(HIST).fill(0.02), "rgba(45,212,191,.35)", h * USER_Y, 3, t, 0);
+      wave(new Array(HIST).fill(0.02), "rgba(167,139,250,.35)", h * LUNA_Y, 3, t, 2);
+    } else if (mode === "thinking") {
+      // calm violet pulse — Luna is working (slow tool calls look alive, not broken)
+      var pulse = 6 + Math.sin(t * 0.003) * 4;
+      wave(userHist, "#2dd4bf", h * USER_Y, 26, t, 0);
+      wave(new Array(HIST).fill(0.25), "#a78bfa", h * LUNA_Y, pulse, t, 2);
+    } else {
+      wave(userHist, "#2dd4bf", h * USER_Y, 26, t, 0);   // you
+      wave(lunaHist, "#a78bfa", h * LUNA_Y, 30, t, 2);   // luna
+    }
+    pushVolumes();
+
+    // infer "thinking": session live, Luna silent, user finished speaking recently
+    if (convo && mode !== "idle" && mode !== "error") {
+      var lunaLoud = lunaHist[HIST - 1] > 0.04;
+      var userLoud = userHist[HIST - 1] > 0.04;
+      if (lunaLoud) setMode("speaking");
+      else if (userLoud) setMode("listening");
+      else if (Date.now() - lastUserSpokeAt < 4000 && mode !== "thinking") setMode("thinking");
+      syncStatus();
+    }
+    requestAnimationFrame(draw);
+  }
+
+  function syncStatus() {
+    if (mode === "speaking") setStatus("Luna is speaking — interrupt anytime");
+    else if (mode === "thinking") setStatus("Luna is thinking…");
+    else if (mode === "listening") setStatus("Listening…");
+  }
+
+  // ------------------------------------------------------------- microphone →
+  // Explicit permission step so a previous "Block" is surfaced and re-askable:
+  // getUserMedia re-prompts when the state is "prompt", and when it's "denied"
+  // we say exactly how to unblock instead of failing silently.
+  async function ensureMic() {
+    if (micStream && micStream.getTracks().some(function (t) { return t.readyState === "live"; })) {
+      return micStream;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error("This browser can't capture microphone audio");
+    }
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      if (err && (err.name === "NotAllowedError" || err.name === "SecurityError")) {
+        throw new Error("Microphone blocked — click the 🎤/lock icon in the address bar, allow the mic, then try again");
+      }
+      throw new Error("Microphone unavailable: " + (err.name || err));
+    }
+    attachAnalyser(micStream);
+    return micStream;
+  }
+
+  function releaseMic() {
+    if (micStream) {
+      micStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} });
+      micStream = null; analyser = null;
+    }
+  }
+
+  // ---------------------------------------------------------------- session →
+  async function start() {
+    if (convo) { return; }
+    if (!window.ElevenLabsClient || !ElevenLabsClient.Conversation) {
+      setLive(true); setMode("error"); setStatus("Voice engine failed to load", true); return;
+    }
+    setLive(true); setMode("connecting"); setStatus("Requesting microphone…");
+    try {
+      await ensureMic();
+      setStatus("Connecting…");
+      // GET: widget iframes only have cookie auth, which Luna treats as
+      // read-only — the backend accepts GET for session minting for this reason.
+      var resp = await fetch(API + "/session", { method: "GET", credentials: "include" });
+      if (!resp.ok) {
+        var detail = "Setup needed — see Settings → Talk";
+        try {
+          var d = (await resp.json()).detail;
+          if (d && typeof d !== "string") { d = JSON.stringify(d); }
+          detail = d || detail;
+        } catch (e) {}
+        throw new Error(detail);
+      }
+      var s = await resp.json();
+      var opts = {
+        onModeChange: function (m) {
+          if (m && m.mode === "speaking") setMode("speaking");
+          else if (m && m.mode === "listening") setMode("listening");
+          syncStatus();
+        },
+        onStatusChange: function (st) {
+          if (st && (st.status === "disconnected" || st.status === "disconnecting")) stop(true);
+        },
+        onError: function () { setStatus("Voice session error", true); setMode("error"); },
+      };
+      // voice is applied to the agent itself when saved in Settings — no
+      // per-session overrides (they'd need an explicit permission on the agent)
+      if (s.conversation_token) {
+        opts.conversationToken = s.conversation_token;
+        opts.connectionType = "webrtc";
+      } else {
+        opts.signedUrl = s.signed_url;
+        opts.connectionType = "websocket";
+      }
+      convo = await ElevenLabsClient.Conversation.startSession(opts);
+      startLiveCheck(s.live_token, micStream);
+      setMode("listening"); setStatus("Listening…");
+    } catch (err) {
+      setMode("error"); setStatus(String(err.message || err), true);
+      releaseMic();
+    }
+  }
+
+  async function stop(passive) {
+    var c = convo; convo = null;
+    stopLiveCheck();
+    releaseMic();
+    setMode("idle"); setLive(false); setStatus("");
+    if (c && !passive) { try { await c.endSession(); } catch (e) {} }
+  }
+
+  endBtn.addEventListener("click", function () { stop(); });
+  cta.addEventListener("click", start);
+  canvas.addEventListener("click", function () { if (!convo) start(); });
+
+  sizeCanvas();
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

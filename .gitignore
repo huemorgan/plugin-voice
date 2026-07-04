@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.zip
+.venv/
+venv/
+.env
+.pytest_cache/
+.DS_Store
+*.egg-info/
+tests/dojo/cache/

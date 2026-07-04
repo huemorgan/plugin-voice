@@ -1,0 +1,28 @@
+[project]
+name = "plugin-voice"
+version = "0.2.0"
+description = "Talk to Luna by voice in the browser — ElevenLabs Agents front-end, Luna stays the brain."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "fastapi", "uvicorn"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["plugin_voice"]
+
+[tool.setuptools.package-data]
+plugin_voice = ["luna-plugin.toml", "ui/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
