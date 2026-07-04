@@ -4,6 +4,21 @@
 **Tests:** 54 unit/dojo passed · **Voice dojo:** 6.7% EER on a 10-voice ElevenLabs matrix
 **Executed autonomously overnight (owner asleep), 2026-07-04/05. plugin-talk untouched.**
 
+> **0.2.1 (morning feedback round):** (1) persona prompt demands the REAL
+> given/identity name — the brain had answered with its roleplay persona
+> ("T-800") instead of its configured name. (2) Non-owner annotation softened:
+> the brain was refusing tasks; now "keep helping, never refuse or mention".
+> (3) Real-mic recognition failed at the clean-TTS threshold (1.353) — enrollment
+> now auto-calibrates a personal threshold from leave-one-out self-similarity
+> (0.6 × min LOO, floor 0.25); added `/enroll/test` + a "Test my voice" button
+> with score feedback and a live level meter (owner couldn't tell recording was
+> happening). (4) Imprint recording broadcasts on BroadcastChannel("plugin-voice");
+> the widget hangs up so the agent stops talking over enrollment. (5) Reset
+> imprint: right-aligned, two-step confirm. (6) Widget statuses say the agent's
+> real name, not "Luna". (7) New `/refresh-persona` + settings button re-runs
+> the personality setup (greeting/fillers/voice) after a personality change.
+> 61 tests green.
+
 ## What was accomplished
 
 - **Duplicated plugin-talk v0.1.7 → plugin-voice 0.2.0** (new package, routes
