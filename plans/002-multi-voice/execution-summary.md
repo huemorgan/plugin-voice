@@ -31,6 +31,15 @@
 > the owner's chat and listed their real playbooks. Debug lesson repeated:
 > `~/.luna/managed_plugins/` shadows in-tree symlinks — a test instance ran
 > stale plugin code until the managed copy was rsynced. 62 tests green.
+>
+> **0.2.3 (gateway keys):** the owner's agent wired the ElevenLabs gateway key
+> to the vault in chat, but the plugin only knew its own pasted key. Now the
+> resolution chain is own key → `ctx.vault.connect("elevenlabs", ...)` (granted
+> vault credential OR the gateway's virtual key, honoring the connection's
+> base_url/auth so proxy metering works) → `LUNA_ELEVENLABS_API_KEY` env.
+> `/connect` accepts an empty body when a key is detected ("Use detected key"
+> button); `/status` reports `key_source` + `agent_ready`; the Voice/imprint/
+> Personality cards are hidden until setup genuinely works. 66 tests green.
 
 ## What was accomplished
 
