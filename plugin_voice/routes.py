@@ -77,13 +77,64 @@ def register_routes(app, ctx):
         value = (getattr(cred, "value", None) or "").strip()
         return value or None
 
+    async def _resolve_key() -> dict | None:
+        """Where the ElevenLabs credential comes from, in precedence order:
+        1. the owner's own pasted key (this plugin's vault entry)
+        2. a granted vault credential or the hosting gateway's virtual key,
+           via the sanctioned ``ctx.vault.connect("elevenlabs", ...)``
+        3. gateway-provisioned env vars (LUNA_ELEVENLABS_API_KEY/_BASE_URL)
+        Returns client-construction kwargs + a ``source`` label, or None."""
+        own = await _read(VAULT_API_KEY)
+        if own:
+            return {"api_key": own, "source": "own"}
+
+        vault = getattr(ctx, "vault", None)
+        connect_fn = getattr(vault, "connect", None)
+        if callable(connect_fn):
+            try:
+                from luna_sdk import AuthSpec
+
+                conn = await connect_fn(
+                    "elevenlabs",
+                    upstream_default="https://api.elevenlabs.io",
+                    auth=AuthSpec(location="header", name="xi-api-key", scheme=None),
+                )
+            except Exception as exc:  # noqa: BLE001 — older SDK / no gateway
+                log.debug("plugin-voice: vault.connect unavailable: %s", exc)
+                conn = None
+            if conn is not None:
+                headers: dict = {}
+                params: dict = {}
+                conn.apply(headers, params)
+                return {
+                    "headers": headers,
+                    "params": params,
+                    "base_url": getattr(conn, "base_url", None) or "https://api.elevenlabs.io",
+                    "source": "gateway" if getattr(conn, "source", "real") == "virtual" else "vault",
+                }
+
+        if getattr(ctx, "get_env", None) is not None:
+            env_key = (ctx.get_env("LUNA_ELEVENLABS_API_KEY") or "").strip()
+            if env_key:
+                return {
+                    "api_key": env_key,
+                    "base_url": (ctx.get_env("LUNA_ELEVENLABS_BASE_URL") or "").strip()
+                    or "https://api.elevenlabs.io",
+                    "source": "env",
+                }
+        return None
+
+    def _client_from(res: dict) -> ElevenLabsClient:
+        kwargs = {k: v for k, v in res.items() if k in ("api_key", "base_url", "headers", "params") and v}
+        return ElevenLabsClient(**kwargs)
+
     async def _client() -> ElevenLabsClient:
         client = get_client()
         if client is None:
-            api_key = await _read(VAULT_API_KEY)
-            if not api_key:
-                raise HTTPException(400, "Not connected — add your ElevenLabs API key in Settings → Talk")
-            client = ElevenLabsClient(api_key)
+            res = await _resolve_key()
+            if res is None:
+                raise HTTPException(400, "Not connected — add your ElevenLabs API key in Settings → Voice")
+            client = _client_from(res)
             set_client(client)
         return client
 
@@ -185,9 +236,16 @@ def register_routes(app, ctx):
 
     @router.post("/connect")
     async def connect(body: _ConnectReq, request: Request, user=Depends(get_current_user)):
-        if not (body.api_key or "").strip():
-            raise HTTPException(400, "Paste your ElevenLabs API key first")
-        probe = ElevenLabsClient(body.api_key.strip())
+        pasted = (body.api_key or "").strip()
+        if pasted:
+            probe = ElevenLabsClient(pasted)
+        else:
+            # No pasted key: use a granted vault credential / gateway key /
+            # env key when one exists (the agent can wire these up in chat).
+            res = await _resolve_key()
+            if res is None:
+                raise HTTPException(400, "Paste your ElevenLabs API key first")
+            probe = _client_from(res)
         try:
             await probe.list_voices()
         except ElevenLabsError as exc:
@@ -195,7 +253,8 @@ def register_routes(app, ctx):
             raise HTTPException(400, f"ElevenLabs rejected the key: {exc}") from exc
 
         vault = _vault()
-        await vault.store_credential(VAULT_API_KEY, body.api_key.strip(), kind="api_key")
+        if pasted:
+            await vault.store_credential(VAULT_API_KEY, pasted, kind="api_key")
         if not await _read(VAULT_BRIDGE_SECRET):
             await vault.store_credential(
                 VAULT_BRIDGE_SECRET, secrets.token_urlsafe(32), kind="api_key"
@@ -286,8 +345,11 @@ def register_routes(app, ctx):
         agent_id = await _read(VAULT_AGENT_ID)
         secret = await _read(VAULT_BRIDGE_SECRET)
         settings = await _settings()
+        key_res = await _resolve_key()
         return {
-            "connected": bool(await _read(VAULT_API_KEY)),
+            "connected": key_res is not None,
+            "key_source": (key_res or {}).get("source"),
+            "agent_ready": bool(agent_id),
             "agent_id": agent_id,
             "voice_id": settings.get("voice_id"),
             "persona_name": settings.get("persona_name"),

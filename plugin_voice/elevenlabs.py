@@ -18,10 +18,20 @@ class ElevenLabsError(Exception):
 
 
 class ElevenLabsClient:
-    def __init__(self, api_key: str, *, base_url: str = DEFAULT_BASE_URL) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        base_url: str = DEFAULT_BASE_URL,
+        headers: dict | None = None,
+        params: dict | None = None,
+    ) -> None:
+        """Direct key (xi-api-key header) or pre-built auth from a vault
+        Connection (gateway keys arrive with their own header/base_url)."""
         self._http = httpx.AsyncClient(
             base_url=base_url,
-            headers={"xi-api-key": api_key},
+            headers=headers if headers is not None else {"xi-api-key": api_key or ""},
+            params=params or None,
             timeout=httpx.Timeout(15.0),
         )
 

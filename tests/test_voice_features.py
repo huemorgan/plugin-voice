@@ -274,3 +274,52 @@ def test_ui_carries_new_affordances(client):
     widget_html = client.get("/api/p/plugin-voice/ui/widgets/voice/").text
     assert "agentName" in widget_html and "BroadcastChannel" in widget_html
     assert "Luna is speaking" not in widget_html
+
+
+# ---------------------------------------------------------- 0.2.3 gateway keys
+
+
+def test_status_detects_gateway_key_without_pasted_key(client, ctx):
+    import sys
+
+    sdk = sys.modules["luna_sdk"]
+    ctx.vault.gateway_connection = sdk.Connection(
+        base_url="https://gw.example.com/proxy/elevenlabs",
+        secret="devtok",
+        auth=sdk.AuthSpec(location="header", name="Authorization", scheme="Bearer"),
+        source="virtual",
+    )
+    st = client.get("/api/p/plugin-voice/status").json()
+    assert st["connected"] is True and st["key_source"] == "gateway"
+    assert st["agent_ready"] is False
+
+
+def test_connect_without_key_uses_gateway_connection(client, ctx):
+    import sys
+
+    sdk = sys.modules["luna_sdk"]
+    ctx.vault.gateway_connection = sdk.Connection(
+        base_url="https://gw.example.com/proxy/elevenlabs",
+        secret="devtok",
+        auth=sdk.AuthSpec(location="header", name="xi-api-key"),
+        source="virtual",
+    )
+    resp = client.post("/api/p/plugin-voice/connect", json={})
+    assert resp.status_code == 200, resp.text
+    st = resp.json()
+    assert st["connected"] is True and st["agent_ready"] is True
+    # nothing stored as the owner's own key — the gateway stays the source
+    from plugin_voice import VAULT_API_KEY
+
+    assert VAULT_API_KEY not in ctx.vault.data
+
+
+def test_connect_without_any_key_still_friendly_400(client):
+    resp = client.post("/api/p/plugin-voice/connect", json={})
+    assert resp.status_code == 400
+    assert isinstance(resp.json()["detail"], str)
+
+
+def test_settings_page_gates_cards_until_ready(client):
+    html = client.get("/api/p/plugin-voice/ui/settings/").text
+    assert "gateCards" in html and 'data-testid="voice-connect-gateway"' in html

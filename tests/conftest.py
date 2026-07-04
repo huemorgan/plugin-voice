@@ -62,6 +62,31 @@ def _install_luna_sdk_stub() -> None:
     def get_current_user():  # overridden per-app in tests when needed
         return {"id": "test-owner"}
 
+    @dataclass
+    class AuthSpec:
+        location: str = "header"
+        name: str = "Authorization"
+        scheme: str | None = None
+
+    @dataclass
+    class Connection:
+        base_url: str
+        secret: str
+        auth: "AuthSpec" = field(default_factory=lambda: AuthSpec())
+        source: str = "real"
+        billed: bool = False
+
+        def apply(self, headers, params):
+            if self.auth.location == "query":
+                params[self.auth.name] = self.secret
+                return
+            headers[self.auth.name] = (
+                f"{self.auth.scheme} {self.secret}" if self.auth.scheme else self.secret
+            )
+
+    mod.AuthSpec = AuthSpec
+    mod.Connection = Connection
+
     mod.ToolDef = ToolDef
     mod.SettingsTab = SettingsTab
     mod.PluginManifest = PluginManifest
@@ -87,6 +112,10 @@ class FakeVault:
 
     def __init__(self) -> None:
         self.data: dict[str, str] = {}
+        self.gateway_connection = None  # set by tests to simulate a granted/gateway key
+
+    async def connect(self, slug: str, *, upstream_default: str, auth=None, credential_name=None):
+        return self.gateway_connection
 
     async def get_credential(self, key: str) -> _Cred:
         if key not in self.data:
@@ -181,8 +210,9 @@ class FakeEL:
     bridge_urls: dict[str, str] = {}      # agent_id -> configured custom-llm url
     voice_sets: list[tuple] = []          # recorded set_agent_voice calls
 
-    def __init__(self, api_key: str, **kw):
+    def __init__(self, api_key: str | None = None, **kw):
         self.api_key = api_key
+        self.kwargs = kw
         self.closed = False
         FakeEL.instances.append(self)
 

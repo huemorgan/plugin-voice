@@ -32,7 +32,9 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
   <label>ElevenLabs API key</label>
   <input id="api-key" data-testid="voice-api-key" type="password" placeholder="sk_…" autocomplete="off" />
   <button id="connect" data-testid="voice-connect">Connect</button>
+  <button id="connect-gateway" data-testid="voice-connect-gateway" style="display:none">Use detected key</button>
   <button id="disconnect" class="ghost">Disconnect</button>
+  <div id="gateway-hint" style="display:none; color:var(--ok); font-size:12.5px; margin-top:6px;"></div>
   <div id="agent-line" data-testid="voice-agent-line" style="display:none"></div>
   <div id="msg"></div>
 </div>
@@ -105,9 +107,36 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
     return body;
   }
 
+  var SOURCE_LABEL = { own: "your API key", vault: "a key from your Key Vault", gateway: "the hosted gateway key", env: "a platform-provided key" };
+
+  function gateCards(ready) {
+    // sections below need a working key + provisioned agent — request:
+    // "remove the other options that are not working until connected properly"
+    document.querySelectorAll(".card").forEach(function (c) {
+      if (c.id !== "connect-card") { c.style.display = ready ? "block" : "none"; }
+    });
+  }
+
   function renderStatus(s) {
-    $("conn-status").textContent = s.connected ? "Connected — ready to talk" : "Not connected";
-    $("conn-status").className = s.connected ? "status-ok" : "status-err";
+    var ready = s.connected && s.agent_ready;
+    if (ready) {
+      $("conn-status").textContent = "Connected via " + (SOURCE_LABEL[s.key_source] || "your key") + " — ready to talk";
+      $("conn-status").className = "status-ok";
+    } else if (s.connected && !s.agent_ready) {
+      $("conn-status").textContent = "Key detected (" + (SOURCE_LABEL[s.key_source] || "key") + ") — one click to finish setup";
+      $("conn-status").className = "status-ok";
+    } else {
+      $("conn-status").textContent = "Not connected";
+      $("conn-status").className = "status-err";
+    }
+    // no pasted key but a vault/gateway/env key exists → offer one-click setup
+    var external = s.connected && s.key_source && s.key_source !== "own" && !s.agent_ready;
+    $("connect-gateway").style.display = external ? "inline-block" : "none";
+    $("gateway-hint").style.display = external ? "block" : "none";
+    if (external) {
+      $("gateway-hint").textContent = "Found " + (SOURCE_LABEL[s.key_source] || "a key") + " — no need to paste anything.";
+    }
+    gateCards(ready);
     var pl = $("persona-line");
     if (s.persona_name) {
       pl.textContent = s.persona_name + " set this voice up personally \u2014 greeting: \u201C" + (s.greeting || "") + "\u201D";
@@ -147,6 +176,28 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
       $("conn-status").className = "status-err";
     }
   }
+
+  async function connectWith(body, btn) {
+    try {
+      btn.disabled = true;
+      msg($("msg"), "Connecting and provisioning the agent\u2026", true);
+      var st = await call("/connect", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      $("api-key").value = "";
+      renderStatus(st);
+      await loadVoices(st.voice_id);
+      refreshImprint();
+      msg($("msg"), "Connected \u2014 the widget is ready.", true);
+    } catch (e) { msg($("msg"), e.message, false); }
+    finally { btn.disabled = false; }
+  }
+
+  $("connect-gateway").addEventListener("click", function () {
+    connectWith({}, $("connect-gateway"));
+  });
 
   $("connect").addEventListener("click", async function () {
     try {
