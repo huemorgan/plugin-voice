@@ -22,7 +22,7 @@ def _manifest():
 def test_toml_and_manifest_agree():
     toml, manifest = _toml(), _manifest()
     assert toml["name"] == manifest.name == "plugin-voice"
-    assert toml["version"] == manifest.version == "0.2.3"
+    assert toml["version"] == manifest.version == "0.3.0"
     assert toml["entry"] == "plugin_voice"
     assert toml["description"] == manifest.description
 
@@ -33,9 +33,13 @@ def test_vault_dependency_declared_everywhere():
     assert "plugin-vault" in manifest.depends_on
 
 
-def test_no_tools_registered_and_toml_matches():
-    assert _toml()["requires"]["tools"] == 0
-    assert "tools" not in _toml() or not _toml().get("tools")
+def test_tools_declared_in_toml():
+    toml = _toml()
+    assert toml["requires"]["tools"] == 2
+    assert {t["name"] for t in toml["tools"]} == {"voice_status", "voice_connect"}
+    by_name = {t["name"]: t for t in toml["tools"]}
+    assert by_name["voice_status"]["policy"] == "auto_approve"
+    assert by_name["voice_connect"]["policy"] == "ask"
 
 
 def test_widget_declared():

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from luna_sdk import LunaPlugin, PluginContext, PluginManifest, SettingsTab
+from luna_sdk import LunaPlugin, PluginContext, PluginManifest, SettingsTab, ToolDef, ToolDef, ToolDef
 
 log = logging.getLogger("plugin-voice")
 
@@ -26,7 +26,7 @@ class VoicePlugin(LunaPlugin):
         name="plugin-voice",
         shown_name="Voice",
         icon="mic",
-        version="0.2.4",
+        version="0.3.0",
         description=(
             "Voice conversations that know who is speaking — owner voice "
             "imprint, personality-matched voice and fillers, ElevenLabs "
@@ -52,10 +52,71 @@ class VoicePlugin(LunaPlugin):
     )
 
     async def on_load(self, ctx: PluginContext) -> None:
-        # Everything lives in routes (bridge + session + settings + static UI).
-        # No agent tools are registered — the plugin is an interface, not a
-        # capability; the bridge turn borrows the owner's installed tools.
-        log.info("plugin-voice loaded (widget=talk, settings tab=talk)")
+        from . import setup
+
+        # 003: the agent can check and COMPLETE the voice setup from chat —
+        # "connect the voice plugin" just works once a key exists anywhere in
+        # the chain (own/vault-grant/gateway/env). The key value never passes
+        # through the agent; resolution happens server-side in setup.py.
+        async def _voice_status() -> dict:
+            try:
+                st = await setup.build_status(ctx)
+            except setup.SetupError as exc:
+                return {"error": str(exc)}
+            st.pop("bridge_secret", None)  # owner-only; never surface to the agent
+            st["note"] = (
+                "connected=key resolvable (source in key_source: own/vault/"
+                "gateway/env); agent_ready=ElevenLabs agent provisioned. If "
+                "connected but not agent_ready, call voice_connect to finish."
+            )
+            return st
+
+        async def _voice_connect() -> dict:
+            try:
+                st = await setup.do_connect(ctx)
+            except setup.SetupError as exc:
+                return {"connected": False, "error": str(exc)}
+            st.pop("bridge_secret", None)
+            st["note"] = "Voice setup complete — the owner can talk via the sidebar Voice widget."
+            return st
+
+        ctx.tool_registry.register(
+            self.manifest.name,
+            ToolDef(
+                name="voice_status",
+                description=(
+                    "Status of the voice (plugin-voice) setup: whether an "
+                    "ElevenLabs/11labs key is available (pasted, vault grant, "
+                    "hosted gateway, or env), whether the voice agent is "
+                    "provisioned, and whether the owner's voice imprint exists."
+                ),
+                parameters={"type": "object", "properties": {}},
+                policy="auto_approve",
+                risk_level="low",
+            ),
+            _voice_status,
+        )
+
+        ctx.tool_registry.register(
+            self.manifest.name,
+            ToolDef(
+                name="voice_connect",
+                description=(
+                    "Complete the voice (plugin-voice) setup using whatever "
+                    "ElevenLabs/11labs key is already available (vault grant, "
+                    "hosted gateway key, or env) — provisions the ElevenLabs "
+                    "voice agent with this agent's own personality. Use after "
+                    "wiring a gateway key, or when voice_status says connected "
+                    "but not agent_ready. No key value is exposed."
+                ),
+                parameters={"type": "object", "properties": {}},
+                policy="ask",
+                risk_level="medium",
+            ),
+            _voice_connect,
+        )
+
+        log.info("plugin-voice loaded (widget=voice, settings tab=voice, tools=2)")
 
     async def on_unload(self) -> None:
         from .state import close_client

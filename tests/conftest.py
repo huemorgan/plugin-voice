@@ -264,6 +264,7 @@ class FakeEL:
 @pytest.fixture(autouse=True)
 def _patch_elevenlabs(monkeypatch):
     from plugin_voice import routes as routes_module
+    from plugin_voice import setup as setup_module
 
     FakeEL.instances = []
     FakeEL.fail_key_check = False
@@ -272,3 +273,4 @@ def _patch_elevenlabs(monkeypatch):
     FakeEL.bridge_urls = {}
     FakeEL.voice_sets = []
     monkeypatch.setattr(routes_module, "ElevenLabsClient", FakeEL)
+    monkeypatch.setattr(setup_module, "ElevenLabsClient", FakeEL)

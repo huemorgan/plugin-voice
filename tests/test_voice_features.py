@@ -323,3 +323,112 @@ def test_connect_without_any_key_still_friendly_400(client):
 def test_settings_page_gates_cards_until_ready(client):
     html = client.get("/api/p/plugin-voice/ui/settings/").text
     assert "gateCards" in html and 'data-testid="voice-connect-gateway"' in html
+
+
+# ------------------------------------------------------------- 003 agent tools
+
+
+def test_resolve_tries_11labs_slug(client, ctx):
+    """The hosted gateway registers ElevenLabs as slug '11labs'."""
+    import sys
+
+    sdk = sys.modules["luna_sdk"]
+    calls = []
+    conn = sdk.Connection(
+        base_url="https://gw/proxy/11labs", secret="tok",
+        auth=sdk.AuthSpec(location="header", name="xi-api-key"), source="virtual",
+    )
+
+    async def connect(slug, *, upstream_default, auth=None, credential_name=None):
+        calls.append(slug)
+        return conn if slug == "11labs" else None
+
+    ctx.vault.connect = connect
+    st = client.get("/api/p/plugin-voice/status").json()
+    assert st["connected"] is True and st["key_source"] == "gateway"
+    assert calls == ["elevenlabs", "11labs"]
+
+
+def test_agent_tools_registered_with_honest_policies(ctx):
+    import asyncio
+
+    from plugin_voice import VoicePlugin
+    from tests.conftest import FakeToolRegistry
+
+    class Reg(FakeToolRegistry):
+        def __init__(self):
+            self.tools = []
+            self.defs = {}
+            self.handlers = {}
+
+        def register(self, plugin, tool_def, handler, **kw):
+            self.defs[tool_def.name] = tool_def
+            self.handlers[tool_def.name] = handler
+
+    ctx.tool_registry = Reg()
+    asyncio.run(VoicePlugin().on_load(ctx))
+    assert set(ctx.tool_registry.defs) == {"voice_status", "voice_connect"}
+    assert ctx.tool_registry.defs["voice_status"].policy == "auto_approve"
+    assert ctx.tool_registry.defs["voice_connect"].policy == "ask"
+
+    # status tool works and never leaks the bridge secret
+    out = asyncio.run(ctx.tool_registry.handlers["voice_status"]())
+    assert "bridge_secret" not in out and "connected" in out
+
+
+def test_voice_connect_tool_completes_setup_after_gateway_grant(client, ctx):
+    """The chat flow: agent wires the gateway key, then voice_connect finishes."""
+    import asyncio
+    import sys
+
+    sdk = sys.modules["luna_sdk"]
+    ctx.vault.gateway_connection = sdk.Connection(
+        base_url="https://gw/proxy/11labs", secret="tok",
+        auth=sdk.AuthSpec(location="header", name="xi-api-key"), source="virtual",
+    )
+    # a prior settings visit captured the tenant's public base
+    client.get("/api/p/plugin-voice/status", headers={"host": "luna.com.ai", "x-forwarded-proto": "https"})
+
+    from plugin_voice import VoicePlugin
+    from plugin_voice import setup as setup_module
+
+    reg_calls = {}
+
+    class Reg:
+        def register(self, plugin, tool_def, handler, **kw):
+            reg_calls[tool_def.name] = handler
+
+    tool_ctx = ctx
+    old_reg = tool_ctx.tool_registry
+    tool_ctx.tool_registry = Reg()
+    asyncio.run(VoicePlugin().on_load(tool_ctx))
+    tool_ctx.tool_registry = old_reg
+
+    out = asyncio.run(reg_calls["voice_connect"]())
+    assert out.get("connected") is True and out.get("agent_ready") is True, out
+    assert "bridge_secret" not in out
+
+
+def test_voice_connect_tool_without_any_key_is_friendly(ctx):
+    import asyncio
+
+    from plugin_voice import VoicePlugin
+
+    handlers = {}
+
+    class Reg:
+        def register(self, plugin, tool_def, handler, **kw):
+            handlers[tool_def.name] = handler
+
+    old = ctx.tool_registry
+    ctx.tool_registry = Reg()
+    asyncio.run(VoicePlugin().on_load(ctx))
+    ctx.tool_registry = old
+    out = asyncio.run(handlers["voice_connect"]())
+    assert out["connected"] is False and "key" in out["error"].lower()
+
+
+def test_settings_page_hides_paste_input_by_default(client):
+    html = client.get("/api/p/plugin-voice/ui/settings/").text
+    assert '<div id="paste-block" style="display:none">' in html
+    assert "11labs" in html

@@ -22,7 +22,7 @@ from luna_sdk import get_current_user
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import VAULT_AGENT_ID, VAULT_API_KEY, VAULT_BRIDGE_SECRET, VAULT_SETTINGS, bridge, personality
+from . import VAULT_AGENT_ID, VAULT_API_KEY, VAULT_BRIDGE_SECRET, VAULT_SETTINGS, bridge, personality, setup
 from .elevenlabs import ElevenLabsClient, ElevenLabsError
 from . import state as live_state
 from .state import get_client, set_client
@@ -78,55 +78,9 @@ def register_routes(app, ctx):
         return value or None
 
     async def _resolve_key() -> dict | None:
-        """Where the ElevenLabs credential comes from, in precedence order:
-        1. the owner's own pasted key (this plugin's vault entry)
-        2. a granted vault credential or the hosting gateway's virtual key,
-           via the sanctioned ``ctx.vault.connect("elevenlabs", ...)``
-        3. gateway-provisioned env vars (LUNA_ELEVENLABS_API_KEY/_BASE_URL)
-        Returns client-construction kwargs + a ``source`` label, or None."""
-        own = await _read(VAULT_API_KEY)
-        if own:
-            return {"api_key": own, "source": "own"}
+        return await setup.resolve_key(ctx)
 
-        vault = getattr(ctx, "vault", None)
-        connect_fn = getattr(vault, "connect", None)
-        if callable(connect_fn):
-            try:
-                from luna_sdk import AuthSpec
-
-                conn = await connect_fn(
-                    "elevenlabs",
-                    upstream_default="https://api.elevenlabs.io",
-                    auth=AuthSpec(location="header", name="xi-api-key", scheme=None),
-                )
-            except Exception as exc:  # noqa: BLE001 — older SDK / no gateway
-                log.debug("plugin-voice: vault.connect unavailable: %s", exc)
-                conn = None
-            if conn is not None:
-                headers: dict = {}
-                params: dict = {}
-                conn.apply(headers, params)
-                return {
-                    "headers": headers,
-                    "params": params,
-                    "base_url": getattr(conn, "base_url", None) or "https://api.elevenlabs.io",
-                    "source": "gateway" if getattr(conn, "source", "real") == "virtual" else "vault",
-                }
-
-        if getattr(ctx, "get_env", None) is not None:
-            env_key = (ctx.get_env("LUNA_ELEVENLABS_API_KEY") or "").strip()
-            if env_key:
-                return {
-                    "api_key": env_key,
-                    "base_url": (ctx.get_env("LUNA_ELEVENLABS_BASE_URL") or "").strip()
-                    or "https://api.elevenlabs.io",
-                    "source": "env",
-                }
-        return None
-
-    def _client_from(res: dict) -> ElevenLabsClient:
-        kwargs = {k: v for k, v in res.items() if k in ("api_key", "base_url", "headers", "params") and v}
-        return ElevenLabsClient(**kwargs)
+    _client_from = setup.client_from
 
     async def _client() -> ElevenLabsClient:
         client = get_client()
@@ -236,95 +190,17 @@ def register_routes(app, ctx):
 
     @router.post("/connect")
     async def connect(body: _ConnectReq, request: Request, user=Depends(get_current_user)):
-        pasted = (body.api_key or "").strip()
-        if pasted:
-            probe = ElevenLabsClient(pasted)
-        else:
-            # No pasted key: use a granted vault credential / gateway key /
-            # env key when one exists (the agent can wire these up in chat).
-            res = await _resolve_key()
-            if res is None:
-                raise HTTPException(400, "Paste your ElevenLabs API key first")
-            probe = _client_from(res)
+        base = _public_base(request)
+        await setup.capture_public_base(ctx, base)
         try:
-            await probe.list_voices()
-        except ElevenLabsError as exc:
-            await probe.close()
-            raise HTTPException(400, f"ElevenLabs rejected the key: {exc}") from exc
-
-        vault = _vault()
-        if pasted:
-            await vault.store_credential(VAULT_API_KEY, pasted, kind="api_key")
-        if not await _read(VAULT_BRIDGE_SECRET):
-            await vault.store_credential(
-                VAULT_BRIDGE_SECRET, secrets.token_urlsafe(32), kind="api_key"
+            return await setup.do_connect(
+                ctx,
+                pasted_key=body.api_key,
+                agent_override=body.agent_id,
+                public_base=base,
             )
-        secret = await _read(VAULT_BRIDGE_SECRET)
-
-        # ElevenLabs appends /chat/completions — hand it the base ending at /v1.
-        public_base = _public_base(request)
-        bridge_base = f"{public_base}/api/p/plugin-voice/v1"
-
-        # Personality-matched setup: the brain names itself, writes its own
-        # greeting, chooses its waiting words, and picks the voice that fits.
-        # Every step degrades to neutral defaults; connect never fails on it.
-        persona = await personality.fetch_persona(ctx)
-        settings = await _settings()
-        voice_id = settings.get("voice_id")  # an explicit owner choice wins
-        if not voice_id and persona.get("voice_description"):
-            try:
-                voice_id = await personality.pick_voice(
-                    ctx, await probe.list_voices(), persona["voice_description"]
-                )
-            except ElevenLabsError:
-                voice_id = None
-        agent_label = f"{persona['name']} (plugin-voice)" if persona.get("name") else AGENT_NAME
-
-        # One key is all the owner provides: find or create the agent and keep
-        # its custom-LLM config pointed at this Luna's bridge. ElevenLabs'
-        # servers can never reach a localhost URL, so a local base must NOT
-        # clobber an already-working public one (e.g. a tunnel).
-        persona_kw = dict(
-            first_message=persona.get("greeting"),
-            fillers=persona.get("fillers"),
-            voice_id=voice_id,
-        )
-        try:
-            agent_id = (body.agent_id or "").strip() or await probe.find_agent(agent_label) \
-                or await probe.find_agent(AGENT_NAME)
-            if agent_id:
-                current = await probe.get_agent_bridge_url(agent_id)
-                keep_current = (
-                    _is_local_host(public_base)
-                    and current
-                    and not _is_local_host(current)
-                )
-                if not keep_current:
-                    await probe.update_agent_bridge(
-                        agent_id, custom_llm_url=bridge_base, bridge_secret=secret, **persona_kw
-                    )
-            else:
-                agent_id = await probe.create_agent(
-                    agent_label, custom_llm_url=bridge_base, bridge_secret=secret, **persona_kw
-                )
-        except ElevenLabsError as exc:
-            await probe.close()
-            raise HTTPException(502, f"Could not provision the ElevenLabs agent: {exc}") from exc
-        await vault.store_credential(VAULT_AGENT_ID, agent_id, kind="config")
-
-        settings.update({
-            "persona_name": persona.get("name"),
-            "greeting": persona.get("greeting"),
-            "fillers": persona.get("fillers"),
-            "voice_id": voice_id,
-        })
-        await vault.store_credential(VAULT_SETTINGS, json.dumps(settings), kind="config")
-
-        old = get_client()
-        if old is not None:
-            await old.close()
-        set_client(probe)
-        return await status(user=user)
+        except setup.SetupError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
 
     @router.post("/disconnect")
     async def disconnect(user=Depends(get_current_user)):
@@ -341,26 +217,13 @@ def register_routes(app, ctx):
         return {"connected": False}
 
     @router.get("/status")
-    async def status(user=Depends(get_current_user)):
-        agent_id = await _read(VAULT_AGENT_ID)
-        secret = await _read(VAULT_BRIDGE_SECRET)
-        settings = await _settings()
-        key_res = await _resolve_key()
-        return {
-            "connected": key_res is not None,
-            "key_source": (key_res or {}).get("source"),
-            "agent_ready": bool(agent_id),
-            "agent_id": agent_id,
-            "voice_id": settings.get("voice_id"),
-            "persona_name": settings.get("persona_name"),
-            "greeting": settings.get("greeting"),
-            "fillers": settings.get("fillers"),
-            "imprint_ready": bool(await _read(VAULT_PROFILE)),
-            # The owner pastes these two into the ElevenLabs agent's Custom LLM
-            # config; the secret is owner-only output (this route is authed).
-            "bridge_path": "/api/p/plugin-voice/v1/chat/completions",
-            "bridge_secret": secret,
-        }
+    async def status(request: Request = None, user=Depends(get_current_user)):
+        if request is not None:
+            await setup.capture_public_base(ctx, _public_base(request))
+        try:
+            return await setup.build_status(ctx)
+        except setup.SetupError as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
 
     @router.get("/voices")
     async def voices(user=Depends(get_current_user)):

@@ -1,6 +1,6 @@
 name = "plugin-voice"
 shown_name = "Voice"
-version = "0.2.4"
+version = "0.3.0"
 description = "Voice conversations that know who is speaking — owner voice imprint, personality-matched voice and fillers, ElevenLabs audio, Luna stays the brain."
 entry = "plugin_voice"
 sdk_version = "0"
@@ -28,5 +28,17 @@ Source: https://github.com/huemorgan/plugin-voice
 """
 
 [requires]
-tools = 0
+tools = 2
 depends_on = ["plugin-vault"]
+
+[[tools]]
+name = "voice_status"
+description = "Status of the voice setup: key availability (own/vault/gateway/env), agent provisioned, imprint ready."
+policy = "auto_approve"
+risk_level = "low"
+
+[[tools]]
+name = "voice_connect"
+description = "Complete the voice setup with whatever ElevenLabs/11labs key is available; provisions the personality-matched voice agent."
+policy = "ask"
+risk_level = "medium"

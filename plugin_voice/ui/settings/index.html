@@ -23,15 +23,18 @@
 </style>
 </head>
 <body>
-<h2>Talk to Luna</h2>
-<p class="hint">Voice runs on ElevenLabs; Luna stays the brain. Audio never touches your Luna server.
-Just paste your ElevenLabs API key — the Luna voice agent is created and wired up automatically.</p>
+<h2>Voice — powered by ElevenLabs (11labs)</h2>
+<p class="hint">Audio runs on your ElevenLabs (11labs) key; your agent stays the brain and audio
+never touches your Luna server. If the platform already provides an 11labs key, setup is one click —
+otherwise paste your own.</p>
 
 <div class="card" id="connect-card">
   <strong id="conn-status" data-testid="voice-conn-status">Checking…</strong>
-  <label>ElevenLabs API key</label>
-  <input id="api-key" data-testid="voice-api-key" type="password" placeholder="sk_…" autocomplete="off" />
-  <button id="connect" data-testid="voice-connect">Connect</button>
+  <div id="paste-block" style="display:none">
+    <label>ElevenLabs (11labs) API key</label>
+    <input id="api-key" data-testid="voice-api-key" type="password" placeholder="sk_…" autocomplete="off" />
+    <button id="connect" data-testid="voice-connect">Connect</button>
+  </div>
   <button id="connect-gateway" data-testid="voice-connect-gateway" style="display:none">Use detected key</button>
   <button id="disconnect" class="ghost">Disconnect</button>
   <div id="gateway-hint" style="display:none; color:var(--ok); font-size:12.5px; margin-top:6px;"></div>
@@ -107,7 +110,7 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
     return body;
   }
 
-  var SOURCE_LABEL = { own: "your API key", vault: "a key from your Key Vault", gateway: "the hosted gateway key", env: "a platform-provided key" };
+  var SOURCE_LABEL = { own: "your own 11labs API key", vault: "the 11labs key in your Key Vault", gateway: "the platform's 11labs gateway key", env: "the platform-provided 11labs key" };
 
   function gateCards(ready) {
     // sections below need a working key + provisioned agent — request:
@@ -119,6 +122,10 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
 
   function renderStatus(s) {
     var ready = s.connected && s.agent_ready;
+    // the paste input is the fallback, not the front door: hidden while a
+    // platform key is available or once everything already works
+    var needPaste = !s.connected;
+    $("paste-block").style.display = needPaste ? "block" : "none";
     if (ready) {
       $("conn-status").textContent = "Connected via " + (SOURCE_LABEL[s.key_source] || "your key") + " — ready to talk";
       $("conn-status").className = "status-ok";
@@ -135,6 +142,10 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
     $("gateway-hint").style.display = external ? "block" : "none";
     if (external) {
       $("gateway-hint").textContent = "Found " + (SOURCE_LABEL[s.key_source] || "a key") + " — no need to paste anything.";
+    }
+    if (ready && s.key_source && s.key_source !== "own") {
+      // connected via a platform key: offer the paste path only as a small escape hatch
+      $("paste-block").style.display = "none";
     }
     gateCards(ready);
     var pl = $("persona-line");
@@ -167,6 +178,8 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
   }
 
   async function refresh() {
+    $("conn-status").textContent = "Checking for an 11labs key\u2026";
+    $("conn-status").className = "";
     try {
       var s = await call("/status");
       renderStatus(s);
@@ -174,6 +187,7 @@ Just paste your ElevenLabs API key — the Luna voice agent is created and wired
     } catch (e) {
       $("conn-status").textContent = "Status unavailable: " + e.message;
       $("conn-status").className = "status-err";
+      $("paste-block").style.display = "block";
     }
   }
 
