@@ -55,3 +55,38 @@
   equivalent server-side) instead of slug guessing.
 - The parallel-session hazard: consider a lightweight lock/notice when two
   agents edit one plugin repo.
+
+
+## Amendment — the HTTP 500 investigation (v0.3.1 round, 2026-07-05)
+
+**Symptom:** "Use detected key" on the hosted tenant → `ElevenLabs /v1/voices
+failed: HTTP 500`.
+
+**Root cause (confirmed in prod logs):** the gateway's 11labs service row was
+mis-entered — `upstream_url` contains the ElevenLabs API KEY (`sk_808b…`)
+instead of `https://api.elevenlabs.io`, so the proxy builds
+`sk_…/v1/voices` and crashes (`ValueError: unknown url type`). The key value
+is therefore also leaked in Render request logs — **rotate it** when convenient.
+`auth_style` is `header:Authorization:Bearer` but ElevenLabs uses `xi-api-key`
+(the resolver handles either, but consistency matters).
+
+**Fix state:** the row was updated via Render one-off jobs *through the app's
+own session* (verified by a read-back job) — but the LIVE web instance still
+serves the old values, and a redeploy-to-refresh **failed to boot**
+(`ConnectionRefusedError` connecting to a DB in lifespan). Conclusion: the
+running instance's env snapshot and the freshly-resolved env point at
+**different databases**, and the freshly-resolved path is unreachable from new
+containers. This is pre-existing platform drift, not caused by this work — the
+next luna-service deploy by anyone would fail the same way. Old instance left
+untouched and healthy.
+
+**The 30-second proper fix (owner):** the fleet admin UI writes through the
+LIVE app's own DB connection — edit gateway service `11labs`:
+`upstream_url = https://api.elevenlabs.io`, `auth_style = header:xi-api-key`.
+Effective immediately, no deploy needed.
+
+**Debug techniques that worked:** Render logs API with `text=` filters found
+the traceback; `/proxy/anthropic` control probe validated the mental model
+(passthrough OK → fault isolated to the 11labs row); one-off jobs with
+exit-code semantics beat phone-home (trycloudflare interstitials eat
+server-to-server POSTs silently).
