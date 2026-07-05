@@ -26,7 +26,7 @@ class VoicePlugin(LunaPlugin):
         name="plugin-voice",
         shown_name="Voice",
         icon="mic",
-        version="0.3.0",
+        version="0.3.1",
         description=(
             "Voice conversations that know who is speaking — owner voice "
             "imprint, personality-matched voice and fillers, ElevenLabs "

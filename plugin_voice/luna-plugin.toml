@@ -1,6 +1,6 @@
 name = "plugin-voice"
 shown_name = "Voice"
-version = "0.3.0"
+version = "0.3.1"
 description = "Voice conversations that know who is speaking — owner voice imprint, personality-matched voice and fillers, ElevenLabs audio, Luna stays the brain."
 entry = "plugin_voice"
 sdk_version = "0"

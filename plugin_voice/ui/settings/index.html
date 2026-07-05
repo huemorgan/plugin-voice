@@ -5,21 +5,77 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Talk — Settings</title>
 <style>
-  :root { --fg:#e8e6f0; --dim:#8a87a0; --card:#1d1b2a; --line:#2e2b40; --accent:#a78bfa; --ok:#2dd4bf; --err:#f87171; }
+  :root {
+    --fg:#eceaf6; --dim:#8f8ca6; --faint:#6b6880;
+    --card:#17151f; --card-edge:#26232f; --inset:#100e17;
+    --accent:#a78bfa; --accent-dim:#8b6cf0;
+    --ok:#2dd4bf; --err:#f87171; --warn:#fbbf24;
+  }
   * { box-sizing: border-box; margin: 0; }
-  body { font: 14px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif; color: var(--fg); background: transparent; padding: 16px; max-width: 640px; }
-  h2 { font-size: 15px; margin-bottom: 4px; }
-  p.hint { color: var(--dim); font-size: 12.5px; margin-bottom: 12px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
-  label { display:block; color: var(--dim); font-size: 12px; margin: 8px 0 3px; }
-  input, select { width: 100%; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--line); background: #14121f; color: var(--fg); font-size: 13px; }
-  button { margin-top: 10px; border: 0; border-radius: 7px; background: var(--accent); color: #14121f; font-weight: 600; padding: 7px 14px; cursor: pointer; font-size: 13px; }
-  button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); }
+  body {
+    font: 14px/1.55 -apple-system,"Segoe UI",Roboto,sans-serif;
+    color: var(--fg); background: transparent;
+    padding: 20px 24px 32px; max-width: 620px;
+  }
+  h2 { font-size: 16px; font-weight: 650; letter-spacing: .01em; }
+  p.hint { color: var(--dim); font-size: 12.5px; margin: 6px 0 18px; max-width: 54ch; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--card-edge);
+    border-radius: 14px; padding: 18px; margin-bottom: 14px;
+  }
+  .card > strong { font-size: 13.5px; font-weight: 650; letter-spacing: .01em; }
+  .card p.hint { margin: 4px 0 12px; }
+
+  label { display:block; color: var(--dim); font-size: 11.5px; text-transform: uppercase;
+          letter-spacing: .07em; margin: 12px 0 5px; }
+  input, select {
+    width: 100%; padding: 9px 11px; border-radius: 9px;
+    border: 1px solid var(--card-edge); background: var(--inset);
+    color: var(--fg); font-size: 13.5px; outline: none;
+  }
+  input:focus, select:focus { border-color: var(--accent-dim); }
+
+  button {
+    margin-top: 12px; border: 0; border-radius: 9px;
+    background: var(--accent); color: #14121f; font-weight: 650;
+    padding: 8px 16px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { background: var(--accent-dim); color: #fff; }
+  button:disabled { opacity: .55; cursor: default; }
+  button.ghost {
+    background: transparent; color: var(--dim);
+    border: 1px solid var(--card-edge);
+  }
+  button.ghost:hover { color: var(--fg); border-color: var(--faint); background: transparent; }
+  .btn-row { display: flex; gap: 8px; align-items: center; }
+
+  /* status badge */
+  #conn-status {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 13px; font-weight: 600;
+  }
+  #conn-status::before {
+    content: ""; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--faint); flex: none;
+  }
+  #conn-status.status-ok::before { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  #conn-status.status-err::before { background: var(--err); }
+
   .status-ok { color: var(--ok); } .status-err { color: var(--err); }
-  code { background:#14121f; padding: 2px 6px; border-radius: 5px; font-size: 12px; word-break: break-all; }
-  #msg, #voice-msg { font-size: 12.5px; margin-top: 8px; min-height: 16px; }
-  #agent-line { color: var(--dim); font-size: 12px; margin-top: 8px; }
-  audio { width: 100%; margin-top: 8px; height: 32px; }
+  code { background: var(--inset); padding: 2px 6px; border-radius: 5px; font-size: 12px; word-break: break-all; }
+  #msg, #voice-msg, #imprint-msg, #persona-msg, #gateway-hint { font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+  #agent-line, #persona-line { color: var(--dim); font-size: 12px; margin-top: 10px; }
+  audio { width: 100%; margin-top: 10px; height: 32px; }
+
+  /* imprint phrase rows */
+  #phrases > div { display:flex; gap:10px; align-items:center; margin:8px 0;
+                   padding: 8px 10px; background: var(--inset); border-radius: 9px; }
+  #phrases button { margin: 0; padding: 5px 12px; font-size: 12px; flex: none; min-width: 96px; }
+  #phrases span { flex: 1; font-size: 12.5px; color: var(--fg); opacity: .9; }
+
+  #rec-meter { height: 6px; border-radius: 3px; background: var(--inset); margin-top: 10px; overflow: hidden; }
+  #rec-level { height: 100%; width: 0%; background: var(--ok); transition: width .08s; }
 </style>
 </head>
 <body>
@@ -35,8 +91,10 @@ otherwise paste your own.</p>
     <input id="api-key" data-testid="voice-api-key" type="password" placeholder="sk_…" autocomplete="off" />
     <button id="connect" data-testid="voice-connect">Connect</button>
   </div>
-  <button id="connect-gateway" data-testid="voice-connect-gateway" style="display:none">Use detected key</button>
-  <button id="disconnect" class="ghost">Disconnect</button>
+  <div class="btn-row">
+    <button id="connect-gateway" data-testid="voice-connect-gateway" style="display:none">Use detected key</button>
+    <button id="disconnect" class="ghost">Disconnect</button>
+  </div>
   <div id="gateway-hint" style="display:none; color:var(--ok); font-size:12.5px; margin-top:6px;"></div>
   <div id="agent-line" data-testid="voice-agent-line" style="display:none"></div>
   <div id="msg"></div>
