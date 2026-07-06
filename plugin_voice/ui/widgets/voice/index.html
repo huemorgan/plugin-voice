@@ -63,7 +63,24 @@
   var endBtn = document.getElementById("end");
 
   var convo = null;          // live Conversation session
-  var agentName = "Agent";   // replaced by persona_name from /session
+  var agentName = "Agent";   // live identity name, else persona_name from /session
+
+  // Bearer token, when the shell provides one (?token= or luna-auth
+  // postMessage). Widget iframes normally ride on cookie auth alone, but the
+  // luna_token cookie goes stale after a server restart — and on hosted
+  // multi-tenant domains it is shared by every tenant, so the last tenant
+  // loaded clobbers it for the others. A shell-provided token survives both.
+  var token = new URLSearchParams(location.search).get("token") || "";
+  window.addEventListener("message", function (e) {
+    if (e.origin === location.origin && e.data && e.data.type === "luna-auth" && e.data.token) {
+      token = e.data.token;
+    }
+  });
+  try { window.parent.postMessage({ type: "luna-request-auth" }, location.origin); } catch (e) {}
+
+  function authHeaders() {
+    return token ? { "Authorization": "Bearer " + token } : {};
+  }
   var mode = "idle";         // idle | connecting | listening | thinking | speaking | error
   var lastUserSpokeAt = 0;
 
@@ -284,7 +301,7 @@
       setStatus("Connecting…");
       // GET: widget iframes only have cookie auth, which Luna treats as
       // read-only — the backend accepts GET for session minting for this reason.
-      var resp = await fetch(API + "/session", { method: "GET", credentials: "include" });
+      var resp = await fetch(API + "/session", { method: "GET", credentials: "include", headers: authHeaders() });
       if (!resp.ok) {
         var detail = "Setup needed — see Settings → Talk";
         try {
@@ -292,10 +309,24 @@
           if (d && typeof d !== "string") { d = JSON.stringify(d); }
           detail = d || detail;
         } catch (e) {}
+        if (resp.status === 401) {
+          // Stale/clobbered luna_token cookie and no shell token — a reload
+          // re-mints both. Raw "Invalid token" reads like a voice-setup bug.
+          detail = "Session expired — reload the page";
+        }
         throw new Error(detail);
       }
       var s = await resp.json();
       if (s.persona_name) { agentName = s.persona_name; }
+      // persona_name is a connect-time snapshot — the owner may have renamed
+      // the agent since. The identity plugin is the live source of truth.
+      try {
+        var ir = await fetch("/api/p/plugin-identity/", { credentials: "include", headers: authHeaders() });
+        if (ir.ok) {
+          var idn = (await ir.json()).name;
+          if (idn) { agentName = idn; }
+        }
+      } catch (e) { /* best-effort; persona_name stands */ }
       var opts = {
         onModeChange: function (m) {
           if (m && m.mode === "speaking") setMode("speaking");

@@ -33,6 +33,11 @@ ENROLL_PHRASES = [
 MIN_ENROLL = 4
 
 
+def as_vector(values) -> np.ndarray:
+    """Stored JSON list → backend vector (dsp_pure has the list[float] twin)."""
+    return np.array(values, dtype=float)
+
+
 def pcm_to_float(pcm: bytes) -> np.ndarray:
     """s16le mono bytes → float32 in [-1, 1]."""
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0

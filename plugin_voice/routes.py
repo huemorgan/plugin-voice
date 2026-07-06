@@ -37,6 +37,8 @@ _NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "
 
 AGENT_NAME = "Luna (plugin-voice)"
 
+AGENT_CONFIG_V = ElevenLabsClient.AGENT_CONFIG_V
+
 
 class _ConnectReq(BaseModel):
     # Optional at the schema level so a blank form yields a friendly 400 string
@@ -126,9 +128,10 @@ def register_routes(app, ctx):
         if agent is None:
             raise HTTPException(503, "Agent not available")
 
-        prompt = bridge.build_prompt(messages)
         speaker = live_state.recent_speaker()
-        owner_verified = not (speaker and speaker[0] == "other")
+        speaker_label = speaker[0] if speaker else None
+        prompt = bridge.build_prompt(messages, speaker=speaker_label)
+        owner_verified = speaker_label != "other"
         if not owner_verified:
             prompt += (
                 "\n\n[Voice note: the current speaker may not be the owner "
@@ -139,12 +142,30 @@ def register_routes(app, ctx):
             )
         tools = bridge.voice_tool_allowlist(ctx, owner_verified=owner_verified)
         log.info(
-            "plugin-voice turn: owner_verified=%s tools=%s (chat=%s playbooks=%s)",
-            owner_verified,
+            "plugin-voice turn: speaker=%s tools=%s (chat=%s playbooks=%s)",
+            speaker_label or "unknown",
             len(tools) if tools else "ALL",
             bool(tools and "send_chat_message" in tools),
             bool(tools and any(t.startswith("playbook_") for t in tools)),
         )
+
+        # Open-mic triage: barge-in is disabled on the agent, so EVERY detected
+        # turn lands here — including room chatter. A Haiku-class run_llm gets
+        # a fast veto before the expensive tool-using turn; it fails open.
+        last_user = next(
+            (bridge._text(m) for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"),
+            "",
+        )
+        run_llm = getattr(agent, "run_llm", None)
+        if callable(run_llm) and not await bridge.triage_utterance(
+            run_llm, last_user, speaker=speaker_label
+        ):
+            log.info("plugin-voice turn: triage=skip (%r)", last_user[:80])
+            if body.get("stream", True):
+                return StreamingResponse(
+                    bridge.silent_stream(), media_type="text/event-stream", headers=_NO_CACHE
+                )
+            return bridge.completion_json("")
 
         async def run() -> str:
             try:
@@ -157,21 +178,21 @@ def register_routes(app, ctx):
             return bridge.normalize_reply(result)
 
         if body.get("stream", True):
-            last_user = next(
-                (bridge._text(m) for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"),
-                "",
-            )
             fillers = (await _settings()).get("fillers") or None
+            # No opening hum for an unrecognized voice: if the brain answers
+            # SKIP, the turn must be truly silent, not "Mm..." then nothing.
+            buffer = "" if speaker_label == "other" else bridge.pick_buffer_words(last_user, fillers)
             return StreamingResponse(
                 bridge.stream_turn(
                     run,
-                    buffer_words=bridge.pick_buffer_words(last_user, fillers),
+                    buffer_words=buffer,
                     keepalive_words=fillers,
                 ),
                 media_type="text/event-stream",
                 headers=_NO_CACHE,
             )
-        return bridge.completion_json(await run())
+        reply = await run()
+        return bridge.completion_json("" if bridge.is_skip(reply) else reply)
 
     # ---------- owner-facing API ----------
 
@@ -254,6 +275,60 @@ def register_routes(app, ctx):
                 log.warning("plugin-voice: voice not applied to agent: %s", exc)
         return settings
 
+    async def _heal_hosted_bridge(client: ElevenLabsClient, agent_id: str, settings: dict) -> None:
+        """On Fly-hosted tenants, re-point agents provisioned before the
+        Fly-direct bridge fix: their custom-LLM url is the browser-facing base
+        (cookie-authed proxy → ElevenLabs gets 401/404 and drops the session
+        on the first question). Best-effort — never blocks session minting."""
+        hosted = setup.hosted_bridge()
+        if not hosted:
+            return
+        expected_url, expected_headers = hosted
+        try:
+            current = await client.get_agent_bridge(agent_id)
+            if current and current["url"] == expected_url and all(
+                (current["request_headers"] or {}).get(k) == v for k, v in expected_headers.items()
+            ):
+                return
+            secret = await _read(VAULT_BRIDGE_SECRET)
+            if not secret:
+                return
+            await client.update_agent_bridge(
+                agent_id,
+                custom_llm_url=expected_url,
+                bridge_secret=secret,
+                first_message=settings.get("greeting"),
+                fillers=settings.get("fillers"),
+                voice_id=settings.get("voice_id"),
+                request_headers=expected_headers,
+            )
+            log.info("plugin-voice: healed stale bridge config → %s", expected_url)
+        except ElevenLabsError as exc:
+            log.warning("plugin-voice: bridge self-heal skipped: %s", exc)
+
+    async def _migrate_agent_config(client: ElevenLabsClient, agent_id: str, settings: dict) -> None:
+        if settings.get("agent_config_v") == AGENT_CONFIG_V:
+            return
+        try:
+            secret = await _read(VAULT_BRIDGE_SECRET)
+            current = await client.get_agent_bridge(agent_id)
+            if not secret or not current:
+                return
+            await client.update_agent_bridge(
+                agent_id,
+                custom_llm_url=current["url"],
+                bridge_secret=secret,
+                first_message=settings.get("greeting"),
+                fillers=settings.get("fillers"),
+                voice_id=settings.get("voice_id"),
+                request_headers=current.get("request_headers") or None,
+            )
+            settings["agent_config_v"] = AGENT_CONFIG_V
+            await _vault().store_credential(VAULT_SETTINGS, json.dumps(settings), kind="config")
+            log.info("plugin-voice: agent config migrated to v%s", AGENT_CONFIG_V)
+        except ElevenLabsError as exc:
+            log.warning("plugin-voice: agent config migration skipped: %s", exc)
+
     # GET as well as POST: the sidebar widget iframe has cookie auth only (the
     # shell doesn't hand widgets a bearer token), and cookie auth is read-only.
     # Minting a session token writes nothing in Luna, so GET is honest.
@@ -265,6 +340,8 @@ def register_routes(app, ctx):
             raise HTTPException(400, "No agent id — finish setup in Settings → Talk")
         client = await _client()
         settings = await _settings()
+        await _heal_hosted_bridge(client, agent_id, settings)
+        await _migrate_agent_config(client, agent_id, settings)
         token = await client.conversation_token(agent_id)
         signed = None if token else await client.signed_url(agent_id)
         if not token and not signed:
@@ -286,16 +363,12 @@ def register_routes(app, ctx):
     # ---------- voice imprint: enrollment + live speaker check ----------
 
     def _dsp():
-        """The recognizer needs numpy, which Luna's runtime may not ship —
-        degrade to a clear 503 instead of killing the whole plugin at load."""
+        """numpy fast path when Luna's runtime ships it (local installs),
+        pure-Python fallback otherwise (hosted never pip-installs plugin deps)."""
         try:
             from . import dsp as dsp_module
-        except ImportError as exc:
-            raise HTTPException(
-                503,
-                "Voice recognition needs the numpy package on this Luna "
-                f"(pip install numpy): {exc}",
-            ) from exc
+        except ImportError:
+            from . import dsp_pure as dsp_module
         return dsp_module
 
     async def _profile():
@@ -307,9 +380,7 @@ def register_routes(app, ctx):
         except ValueError:
             return None, {}
         emb = data.get("profile")
-        import numpy as np
-
-        return (np.array(emb, dtype=float) if emb else None), data
+        return (_dsp().as_vector(emb) if emb else None), data
 
     @router.get("/enroll")
     async def enroll_status(user=Depends(get_current_user)):
@@ -347,9 +418,7 @@ def register_routes(app, ctx):
         profile = None
         personal_threshold = None
         if len(embs) >= dsp.MIN_ENROLL:
-            import numpy as np
-
-            vecs = [np.array(v) for v in embs.values()]
+            vecs = [dsp.as_vector(v) for v in embs.values()]
             profile = [float(x) for x in dsp.profile_from(vecs)]
             # Personal threshold from leave-one-out self-similarity: the global
             # dojo threshold is tuned on clean TTS and proved too strict for
@@ -461,10 +530,15 @@ def register_routes(app, ctx):
             except ElevenLabsError:
                 voice_id = None
 
-        bridge_base = f"{_public_base(request)}/api/p/plugin-voice/v1"
-        current = await client.get_agent_bridge_url(agent_id)
-        if _is_local_host(bridge_base) and current and not _is_local_host(current):
-            bridge_base = current  # keep a working tunnel URL
+        hosted = setup.hosted_bridge()
+        if hosted:
+            bridge_base, bridge_headers = hosted
+        else:
+            bridge_headers = None
+            bridge_base = f"{_public_base(request)}/api/p/plugin-voice/v1"
+            current = await client.get_agent_bridge_url(agent_id)
+            if _is_local_host(bridge_base) and current and not _is_local_host(current):
+                bridge_base = current  # keep a working tunnel URL
 
         settings = await _settings()
         try:
@@ -475,6 +549,7 @@ def register_routes(app, ctx):
                 first_message=persona.get("greeting"),
                 fillers=persona.get("fillers"),
                 voice_id=voice_id or settings.get("voice_id"),
+                request_headers=bridge_headers,
             )
         except ElevenLabsError as exc:
             raise HTTPException(502, f"Could not update the agent: {exc}") from exc

@@ -42,8 +42,21 @@ VOICE_SYSTEM_PROMPT = (
     "spoken rhythm, at most a few sentences per turn unless asked to elaborate. "
     "Never use markdown, bullet lists, tables, code blocks, or emoji. Don't "
     "read out URLs or long identifiers; describe them instead. If a task will "
-    "take a while, say so briefly and give the short version first."
+    "take a while, say so briefly and give the short version first.\n"
+    "The microphone is OPEN, possibly in a noisy room: the transcript can "
+    "contain background chatter, a TV, or people talking to each other — not "
+    "to you. Each utterance is tagged with who spoke (the recognized owner or "
+    "an unrecognized voice). If the latest input is not addressed to you or "
+    "needs no spoken reply, respond with exactly SKIP (nothing else) and you "
+    "will stay silent."
 )
+
+# Reply sentinel: the brain answers exactly this to stay silent for a turn.
+SKIP_SENTINEL = "SKIP"
+
+
+def is_skip(reply: str) -> bool:
+    return (reply or "").strip().strip('."”’').upper() == SKIP_SENTINEL
 
 # Tools a voice turn must NOT get, by name. run_turn does not enforce approval
 # policy (same caveat plugin-whatsapp documents) — the def-level rules below
@@ -96,11 +109,18 @@ def voice_tool_allowlist(ctx: Any, *, owner_verified: bool = True) -> list[str] 
     return allowed or None
 
 
-def build_prompt(messages: list[dict[str, Any]], *, window: int = HISTORY_WINDOW) -> str:
+def build_prompt(
+    messages: list[dict[str, Any]],
+    *,
+    window: int = HISTORY_WINDOW,
+    speaker: str | None = None,
+) -> str:
     """Fold the OpenAI ``messages`` array into a single run_turn prompt.
 
     The voice style preamble leads; a trimmed transcript window follows; the
-    latest user utterance closes the prompt as the thing to answer.
+    latest user utterance closes the prompt as the thing to answer. ``speaker``
+    is the live imprint verdict for the current utterance: ``"owner"``,
+    ``"other"`` (someone else), or None (no imprint / no recent signal).
     """
     convo = [m for m in messages if m.get("role") in ("user", "assistant") and _text(m)]
     tail = convo[-window:]
@@ -111,10 +131,68 @@ def build_prompt(messages: list[dict[str, Any]], *, window: int = HISTORY_WINDOW
 
     parts = [VOICE_SYSTEM_PROMPT]
     if tail:
-        lines = [f"{'You' if m['role'] == 'assistant' else 'Owner'}: {_text(m)}" for m in tail]
+        lines = [f"{'You' if m['role'] == 'assistant' else 'Heard'}: {_text(m)}" for m in tail]
         parts.append("[Recent voice conversation]\n" + "\n".join(lines))
-    parts.append(f"The owner just said (respond to this, aloud):\n{current or '(silence)'}")
+    if speaker == "other":
+        lead = (
+            "An UNRECOGNIZED voice (not the owner) just said this — decide "
+            "whether it is meant for you (respond aloud, or SKIP)"
+        )
+    elif speaker == "owner":
+        lead = "The owner just said (respond to this, aloud — or SKIP if it isn't for you)"
+    else:
+        lead = "The person just said (respond to this, aloud — or SKIP if it isn't for you)"
+    parts.append(f"{lead}:\n{current or '(silence)'}")
     return "\n\n".join(parts)
+
+
+# Fast open-mic triage: a Haiku-class model decides in a word whether an
+# utterance deserves the full (slow, tool-using) agent turn. Fail OPEN — a
+# dropped real request is far worse than a spoken reply to chatter.
+TRIAGE_TIMEOUT = 2.0
+
+TRIAGE_SYSTEM = (
+    "You gate an open microphone for a voice assistant in a possibly noisy "
+    "room. Given the latest transcript utterance, answer with ONE word:\n"
+    "RESPOND — it is plausibly addressed to the assistant (a question, "
+    "command, or continuation of the conversation with it).\n"
+    "SKIP — background chatter, media audio, people talking to each other, "
+    "or a fragment that needs no reply.\n"
+    "When unsure, answer RESPOND."
+)
+
+
+async def triage_utterance(
+    run_llm: Callable[..., Awaitable[Any]],
+    utterance: str,
+    *,
+    speaker: str | None = None,
+    timeout: float = TRIAGE_TIMEOUT,
+) -> bool:
+    """True → run the full agent turn; False → stay silent this turn."""
+    import asyncio
+
+    if not (utterance or "").strip():
+        return False
+    who = {"owner": "the recognized owner", "other": "an unrecognized voice"}.get(
+        speaker or "", "an unidentified speaker"
+    )
+    try:
+        result = await asyncio.wait_for(
+            run_llm(
+                f"Spoken by {who}:\n{utterance}",
+                system=TRIAGE_SYSTEM,
+                temperature=0.0,
+                max_tokens=4,
+            ),
+            timeout=timeout,
+        )
+    except Exception:  # noqa: BLE001 — timeout, old Luna without run_llm, provider error
+        return True
+    verdict = result[0] if isinstance(result, tuple) and result else result
+    if isinstance(verdict, dict):
+        verdict = verdict.get("text") or verdict.get("content") or ""
+    return "SKIP" not in str(verdict or "").upper()
 
 
 def _text(message: dict[str, Any]) -> str:
@@ -220,9 +298,20 @@ async def stream_turn(
             reply = "Sorry, something went wrong on my side. Ask me again in a moment."
             break
 
-    for chunk in split_speech_chunks(reply):
-        yield content(chunk)
+    if not is_skip(reply):
+        for chunk in split_speech_chunks(reply):
+            yield content(chunk)
 
+    yield sse_event(_chunk_payload(completion_id, created, delta={}, finish_reason="stop"))
+    yield SSE_DONE
+
+
+async def silent_stream() -> AsyncIterator[str]:
+    """A well-formed SSE completion with no spoken content — the agent simply
+    doesn't answer this turn (open-mic chatter gated out by triage)."""
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    yield sse_event(_chunk_payload(completion_id, created, delta={"role": "assistant"}))
     yield sse_event(_chunk_payload(completion_id, created, delta={}, finish_reason="stop"))
     yield SSE_DONE
 

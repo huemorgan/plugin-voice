@@ -113,6 +113,11 @@ class ElevenLabsClient:
             raise ElevenLabsError("secret create returned no secret_id")
         return secret_id
 
+    # Bump when _agent_config changes shape; installs stamp it into settings
+    # and /session re-PATCHes agents provisioned under an older shape once.
+    # v2: barge-in disabled + transcribe_on_disabled_interruptions (open mic).
+    AGENT_CONFIG_V = 2
+
     @staticmethod
     def _agent_config(
         custom_llm_url: str,
@@ -121,6 +126,7 @@ class ElevenLabsClient:
         first_message: str | None = None,
         fillers: list[str] | None = None,
         voice_id: str | None = None,
+        request_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         # api_type "chat_completions": ElevenLabs appends /chat/completions to
         # the url, so we hand it the bridge base ending at .../v1 (verified
@@ -131,8 +137,26 @@ class ElevenLabsClient:
         primary = fillers[0] if fillers else "One moment, I'm checking that..."
         rest = fillers[1:] if len(fillers) > 1 else ["Still working on it...", "Almost there, hang on..."]
         config: dict[str, Any] = {
+            # Barge-in OFF: in a noisy room every stray voice used to cut the
+            # agent mid-sentence. "interruption" absent from client_events
+            # disables it; what people say while the agent talks is still
+            # transcribed and carried into the next turn, where the brain (plus
+            # the bridge's fast triage) decides if it matters.
+            "conversation": {
+                "client_events": [
+                    "conversation_initiation_metadata",
+                    "asr_initiation_metadata",
+                    "ping",
+                    "audio",
+                    "user_transcript",
+                    "agent_response",
+                    "agent_response_correction",
+                    "vad_score",
+                ],
+            },
             "turn": {
                 "turn_eagerness": "patient",
+                "transcribe_on_disabled_interruptions": True,
                 "soft_timeout_config": {
                     "timeout_seconds": 5.0,
                     "message": primary,
@@ -157,7 +181,10 @@ class ElevenLabsClient:
                         "url": custom_llm_url,
                         "model_id": "luna",
                         "api_key": {"secret_id": secret_id},
-                        "request_headers": {},
+                        # Non-auth routing headers only (e.g. Fly's
+                        # fly-force-instance-id machine pin) — ElevenLabs strips
+                        # a plain Authorization entry here, hence api_key above.
+                        "request_headers": dict(request_headers or {}),
                     },
                 },
             },
@@ -182,6 +209,7 @@ class ElevenLabsClient:
         first_message: str | None = None,
         fillers: list[str] | None = None,
         voice_id: str | None = None,
+        request_headers: dict[str, str] | None = None,
     ) -> str:
         secret_id = await self._ensure_secret(bridge_secret)
         data = await self._req(
@@ -192,6 +220,7 @@ class ElevenLabsClient:
                 "conversation_config": self._agent_config(
                     custom_llm_url, secret_id,
                     first_message=first_message, fillers=fillers, voice_id=voice_id,
+                    request_headers=request_headers,
                 ),
             },
         )
@@ -209,6 +238,7 @@ class ElevenLabsClient:
         first_message: str | None = None,
         fillers: list[str] | None = None,
         voice_id: str | None = None,
+        request_headers: dict[str, str] | None = None,
     ) -> None:
         """Re-point an existing agent at the (possibly moved) bridge + fresh secret."""
         secret_id = await self._ensure_secret(bridge_secret)
@@ -219,18 +249,28 @@ class ElevenLabsClient:
                 "conversation_config": self._agent_config(
                     custom_llm_url, secret_id,
                     first_message=first_message, fillers=fillers, voice_id=voice_id,
+                    request_headers=request_headers,
                 ),
             },
         )
 
-    async def get_agent_bridge_url(self, agent_id: str) -> str | None:
-        """The custom-LLM url currently configured on the agent (None if unset)."""
+    async def get_agent_bridge(self, agent_id: str) -> dict[str, Any] | None:
+        """The agent's current custom-LLM config: ``{"url", "request_headers"}``
+        (None if the agent or its custom_llm block is missing)."""
         try:
             data = await self._get(f"/v1/convai/agents/{agent_id}")
         except ElevenLabsError:
             return None
         prompt = ((data.get("conversation_config") or {}).get("agent") or {}).get("prompt") or {}
-        return (prompt.get("custom_llm") or {}).get("url")
+        custom = prompt.get("custom_llm") or {}
+        if not custom.get("url"):
+            return None
+        return {"url": custom["url"], "request_headers": custom.get("request_headers") or {}}
+
+    async def get_agent_bridge_url(self, agent_id: str) -> str | None:
+        """The custom-LLM url currently configured on the agent (None if unset)."""
+        cfg = await self.get_agent_bridge(agent_id)
+        return cfg["url"] if cfg else None
 
     async def set_agent_voice(self, agent_id: str, voice_id: str | None) -> None:
         """Set the agent's TTS voice (agent default — no per-session override needed)."""

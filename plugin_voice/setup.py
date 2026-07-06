@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets as _secrets
 from typing import Any
 
@@ -75,6 +76,27 @@ async def settings_of(ctx: Any) -> dict:
 
 async def save_settings(ctx: Any, settings: dict) -> None:
     await vault_of(ctx).store_credential(VAULT_SETTINGS, json.dumps(settings), kind="config")
+
+
+def hosted_bridge() -> tuple[str, dict[str, str]] | None:
+    """Fly-hosted tenants: ``(bridge base URL, pinning headers)``, else None.
+
+    The tenant's browser-facing URL (``https://luna.com.ai/a/{slug}/...``) sits
+    behind a proxy that requires a login cookie, so ElevenLabs (server→server)
+    can never reach the bridge through it. But the machine itself is publicly
+    reachable on the shared Fly app hostname, and Fly routes a request to THIS
+    machine when it carries ``fly-force-instance-id`` — the same mechanism
+    luna-service's own proxy uses. Fly injects both env vars into every
+    machine; ``ctx.get_env`` only allows LUNA_* names, hence ``os.environ``.
+    """
+    app = (os.environ.get("FLY_APP_NAME") or "").strip()
+    machine = (os.environ.get("FLY_MACHINE_ID") or "").strip()
+    if not app or not machine:
+        return None
+    return (
+        f"https://{app}.fly.dev/api/p/plugin-voice/v1",
+        {"fly-force-instance-id": machine},
+    )
 
 
 def is_local_host(base: str) -> bool:
@@ -207,15 +229,22 @@ async def do_connect(
     secret = await read(ctx, VAULT_BRIDGE_SECRET)
 
     settings = await settings_of(ctx)
-    public_base = public_base or settings.get("public_base")
-    if not public_base:
-        await probe.close()
-        raise SetupError(
-            "I don't know this Luna's public URL yet — open Settings → Voice "
-            "once (any visit records it), then retry"
-        )
     # ElevenLabs appends /chat/completions — hand it the base ending at /v1.
-    bridge_base = f"{public_base}/api/p/plugin-voice/v1"
+    # Fly-direct wins over the browser-facing base: the tenant's public URL
+    # sits behind a cookie-authed proxy ElevenLabs can't pass.
+    hosted = hosted_bridge()
+    if hosted:
+        bridge_base, bridge_headers = hosted
+    else:
+        bridge_headers = None
+        public_base = public_base or settings.get("public_base")
+        if not public_base:
+            await probe.close()
+            raise SetupError(
+                "I don't know this Luna's public URL yet — open Settings → Voice "
+                "once (any visit records it), then retry"
+            )
+        bridge_base = f"{public_base}/api/p/plugin-voice/v1"
 
     # Personality-matched setup: the brain names itself, writes its own
     # greeting, chooses its waiting words, and picks the voice that fits.
@@ -235,6 +264,7 @@ async def do_connect(
         first_message=persona.get("greeting"),
         fillers=persona.get("fillers"),
         voice_id=voice_id,
+        request_headers=bridge_headers,
     )
     try:
         agent_id = (agent_override or "").strip() or await probe.find_agent(agent_label) \
@@ -242,7 +272,10 @@ async def do_connect(
         if agent_id:
             current = await probe.get_agent_bridge_url(agent_id)
             keep_current = (
-                is_local_host(public_base) and current and not is_local_host(current)
+                not hosted
+                and is_local_host(public_base)
+                and current
+                and not is_local_host(current)
             )
             if not keep_current:
                 await probe.update_agent_bridge(
@@ -262,6 +295,9 @@ async def do_connect(
         "greeting": persona.get("greeting"),
         "fillers": persona.get("fillers"),
         "voice_id": voice_id,
+        # Provisioned with the current config shape — /session's one-time
+        # migration must not re-PATCH a fresh agent.
+        "agent_config_v": ElevenLabsClient.AGENT_CONFIG_V,
     })
     await save_settings(ctx, settings)
 

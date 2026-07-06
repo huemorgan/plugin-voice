@@ -203,11 +203,15 @@ def client(app):
 class FakeEL:
     """Stands in for ElevenLabsClient in routes — no network."""
 
+    from plugin_voice.elevenlabs import ElevenLabsClient as _real
+    AGENT_CONFIG_V = _real.AGENT_CONFIG_V  # code under test reads this off the class
+
     instances: list["FakeEL"] = []
     fail_key_check = False
     existing_agents: dict[str, str] = {}  # name -> agent_id
     agent_configs: list[dict] = []        # recorded create/update calls
     bridge_urls: dict[str, str] = {}      # agent_id -> configured custom-llm url
+    bridge_headers: dict[str, dict] = {}  # agent_id -> configured request headers
     voice_sets: list[tuple] = []          # recorded set_agent_voice calls
 
     def __init__(self, api_key: str | None = None, **kw):
@@ -244,6 +248,13 @@ class FakeEL:
              "secret": bridge_secret, **persona}
         )
         FakeEL.bridge_urls[agent_id] = custom_llm_url
+        FakeEL.bridge_headers[agent_id] = persona.get("request_headers") or {}
+
+    async def get_agent_bridge(self, agent_id: str):
+        url = FakeEL.bridge_urls.get(agent_id)
+        if not url:
+            return None
+        return {"url": url, "request_headers": FakeEL.bridge_headers.get(agent_id, {})}
 
     async def get_agent_bridge_url(self, agent_id: str):
         return FakeEL.bridge_urls.get(agent_id)
@@ -271,6 +282,10 @@ def _patch_elevenlabs(monkeypatch):
     FakeEL.existing_agents = {}
     FakeEL.agent_configs = []
     FakeEL.bridge_urls = {}
+    FakeEL.bridge_headers = {}
     FakeEL.voice_sets = []
     monkeypatch.setattr(routes_module, "ElevenLabsClient", FakeEL)
     monkeypatch.setattr(setup_module, "ElevenLabsClient", FakeEL)
+    # Deterministic off-Fly baseline; hosted-bridge tests set these explicitly.
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    monkeypatch.delenv("FLY_MACHINE_ID", raising=False)

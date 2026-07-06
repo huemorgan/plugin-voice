@@ -341,7 +341,14 @@ otherwise paste your own.</p>
   }
 
   async function refreshImprint() {
-    try { renderPhrases(await call("/enroll")); } catch (e) { /* not connected yet */ }
+    try {
+      renderPhrases(await call("/enroll"));
+    } catch (e) {
+      // Surface the failure (503 numpy missing, stale auth, …) — swallowing it
+      // left the card with no recorder and no explanation.
+      $("imprint-status").textContent = "Recording unavailable: " + e.message;
+      $("imprint-status").className = "status-err";
+    }
   }
 
   async function recordPhrase(i, btn) {
