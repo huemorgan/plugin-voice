@@ -127,12 +127,17 @@ class ElevenLabsClient:
         fillers: list[str] | None = None,
         voice_id: str | None = None,
         request_headers: dict[str, str] | None = None,
+        overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # api_type "chat_completions": ElevenLabs appends /chat/completions to
         # the url, so we hand it the bridge base ending at .../v1 (verified
         # live against the API, 2026-07). Soft-timeout fillers + patient turns
         # keep slow tool-using brains alive in noisy rooms (001 findings); the
         # filler texts come from the brain's own personality when available.
+        # ``overrides`` are the owner's Voice Persona tweaks (004): passthrough
+        # prompt, soft-timeout seconds/count, turn eagerness. Absent → the
+        # shipped values below, byte-identical to pre-004 configs.
+        ov = overrides or {}
         fillers = [f.strip() for f in (fillers or []) if f and f.strip()][:5]
         primary = fillers[0] if fillers else "One moment, I'm checking that..."
         rest = fillers[1:] if len(fillers) > 1 else ["Still working on it...", "Almost there, hang on..."]
@@ -155,14 +160,16 @@ class ElevenLabsClient:
                 ],
             },
             "turn": {
-                "turn_eagerness": "patient",
+                "turn_eagerness": ov.get("turn_eagerness") or "patient",
                 "transcribe_on_disabled_interruptions": True,
                 "soft_timeout_config": {
-                    "timeout_seconds": 5.0,
+                    "timeout_seconds": float(ov.get("soft_timeout_seconds") or 5.0),
                     "message": primary,
                     "additional_soft_timeout_messages": rest,
                     "randomize_fillers": True,
-                    "max_soft_timeouts_per_generation": 3,
+                    "max_soft_timeouts_per_generation": (
+                        ov["max_soft_timeouts"] if ov.get("max_soft_timeouts") is not None else 3
+                    ),
                     "use_llm_generated_message": False,
                 },
             },
@@ -171,7 +178,7 @@ class ElevenLabsClient:
                 # via the persona fetch; this is only used if that failed.
                 "first_message": first_message or "Hey, I'm listening — what can I do for you?",
                 "prompt": {
-                    "prompt": (
+                    "prompt": ov.get("passthrough_prompt") or (
                         "Every reply is produced by the connected custom LLM "
                         "(the agent's own loop, with its real name and "
                         "personality); pass conversation through faithfully."
@@ -210,6 +217,7 @@ class ElevenLabsClient:
         fillers: list[str] | None = None,
         voice_id: str | None = None,
         request_headers: dict[str, str] | None = None,
+        overrides: dict[str, Any] | None = None,
     ) -> str:
         secret_id = await self._ensure_secret(bridge_secret)
         data = await self._req(
@@ -220,7 +228,7 @@ class ElevenLabsClient:
                 "conversation_config": self._agent_config(
                     custom_llm_url, secret_id,
                     first_message=first_message, fillers=fillers, voice_id=voice_id,
-                    request_headers=request_headers,
+                    request_headers=request_headers, overrides=overrides,
                 ),
             },
         )
@@ -239,6 +247,7 @@ class ElevenLabsClient:
         fillers: list[str] | None = None,
         voice_id: str | None = None,
         request_headers: dict[str, str] | None = None,
+        overrides: dict[str, Any] | None = None,
     ) -> None:
         """Re-point an existing agent at the (possibly moved) bridge + fresh secret."""
         secret_id = await self._ensure_secret(bridge_secret)
@@ -249,7 +258,7 @@ class ElevenLabsClient:
                 "conversation_config": self._agent_config(
                     custom_llm_url, secret_id,
                     first_message=first_message, fillers=fillers, voice_id=voice_id,
-                    request_headers=request_headers,
+                    request_headers=request_headers, overrides=overrides,
                 ),
             },
         )

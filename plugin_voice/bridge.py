@@ -114,6 +114,7 @@ def build_prompt(
     *,
     window: int = HISTORY_WINDOW,
     speaker: str | None = None,
+    system_prompt: str | None = None,
 ) -> str:
     """Fold the OpenAI ``messages`` array into a single run_turn prompt.
 
@@ -121,6 +122,8 @@ def build_prompt(
     latest user utterance closes the prompt as the thing to answer. ``speaker``
     is the live imprint verdict for the current utterance: ``"owner"``,
     ``"other"`` (someone else), or None (no imprint / no recent signal).
+    ``system_prompt`` replaces the shipped voice preamble (owner-editable in
+    the Voice Persona tab).
     """
     convo = [m for m in messages if m.get("role") in ("user", "assistant") and _text(m)]
     tail = convo[-window:]
@@ -129,7 +132,7 @@ def build_prompt(
         current = _text(tail[-1])
         tail = tail[:-1]
 
-    parts = [VOICE_SYSTEM_PROMPT]
+    parts = [system_prompt or VOICE_SYSTEM_PROMPT]
     if tail:
         lines = [f"{'You' if m['role'] == 'assistant' else 'Heard'}: {_text(m)}" for m in tail]
         parts.append("[Recent voice conversation]\n" + "\n".join(lines))
@@ -168,6 +171,7 @@ async def triage_utterance(
     *,
     speaker: str | None = None,
     timeout: float = TRIAGE_TIMEOUT,
+    system: str | None = None,
 ) -> bool:
     """True → run the full agent turn; False → stay silent this turn."""
     import asyncio
@@ -181,7 +185,7 @@ async def triage_utterance(
         result = await asyncio.wait_for(
             run_llm(
                 f"Spoken by {who}:\n{utterance}",
-                system=TRIAGE_SYSTEM,
+                system=system or TRIAGE_SYSTEM,
                 temperature=0.0,
                 max_tokens=4,
             ),

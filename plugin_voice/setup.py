@@ -26,6 +26,8 @@ from . import (
     VAULT_API_KEY,
     VAULT_BRIDGE_SECRET,
     VAULT_SETTINGS,
+    identity,
+    persona_config,
     personality,
 )
 from .elevenlabs import ElevenLabsClient, ElevenLabsError
@@ -172,15 +174,19 @@ async def build_status(ctx: Any) -> dict:
     secret = await read(ctx, VAULT_BRIDGE_SECRET)
     settings = await settings_of(ctx)
     key_res = await resolve_key(ctx)
+    # 004: the LIVE identity name wins — the stored snapshot is only what the
+    # greeting was generated for and goes stale on rename.
+    live = await identity.live_name(ctx)
+    eff = persona_config.effective(settings)
     return {
         "connected": key_res is not None,
         "key_source": (key_res or {}).get("source"),
         "agent_ready": bool(agent_id),
         "agent_id": agent_id,
         "voice_id": settings.get("voice_id"),
-        "persona_name": settings.get("persona_name"),
-        "greeting": settings.get("greeting"),
-        "fillers": settings.get("fillers"),
+        "persona_name": live or settings.get("persona_name"),
+        "greeting": eff.get("greeting"),
+        "fillers": eff.get("fillers"),
         "imprint_ready": bool(await read(ctx, _routes.VAULT_PROFILE)),
         "bridge_path": "/api/p/plugin-voice/v1/chat/completions",
         "bridge_secret": secret,
@@ -260,11 +266,14 @@ async def do_connect(
             voice_id = None
     agent_label = f"{persona['name']} (plugin-voice)" if persona.get("name") else AGENT_NAME
 
+    # Owner Voice Persona overrides (004) beat the fetched persona.
+    ov = persona_config.overrides_of(settings)
     persona_kw = dict(
-        first_message=persona.get("greeting"),
-        fillers=persona.get("fillers"),
+        first_message=ov.get("greeting") or persona.get("greeting"),
+        fillers=ov.get("fillers") or persona.get("fillers"),
         voice_id=voice_id,
         request_headers=bridge_headers,
+        overrides=persona_config.elevenlabs_overrides(settings),
     )
     try:
         agent_id = (agent_override or "").strip() or await probe.find_agent(agent_label) \
@@ -306,3 +315,78 @@ async def do_connect(
         await old.close()
     set_client(probe)
     return await build_status(ctx)
+
+
+async def resync_persona(
+    ctx: Any,
+    client: ElevenLabsClient,
+    agent_id: str,
+    *,
+    preferred_base: str | None = None,
+) -> dict:
+    """Re-ask the agent who it is and re-PATCH the ElevenLabs agent.
+
+    004: shared by the manual "Re-match" button and the automatic rename
+    resync fired from ``/session``. Owner Voice Persona overrides always win
+    over the freshly fetched persona; an explicit owner voice pick is kept.
+    ``preferred_base`` is a browser-derived bridge base (``…/v1``) — used
+    unless it's a localhost while the agent already has a working tunnel URL.
+    """
+    secret = await read(ctx, VAULT_BRIDGE_SECRET)
+    if not secret:
+        raise SetupError("Connect first")
+
+    persona = await personality.fetch_persona(ctx)
+    settings = await settings_of(ctx)
+    voice_id = None
+    if persona.get("voice_description"):
+        try:
+            voice_id = await personality.pick_voice(
+                ctx, await client.list_voices(), persona["voice_description"]
+            )
+        except ElevenLabsError:
+            voice_id = None
+
+    hosted = hosted_bridge()
+    if hosted:
+        bridge_base, bridge_headers = hosted
+    else:
+        bridge_headers = None
+        current = await client.get_agent_bridge_url(agent_id)
+        bridge_base = preferred_base
+        if bridge_base and is_local_host(bridge_base) and current and not is_local_host(current):
+            bridge_base = current  # keep a working tunnel URL
+        if not bridge_base:
+            bridge_base = current
+        if not bridge_base:
+            public = settings.get("public_base")
+            if not public:
+                raise SetupError("No reachable bridge URL known — reconnect once", 400)
+            bridge_base = f"{public}/api/p/plugin-voice/v1"
+
+    ov = persona_config.overrides_of(settings)
+    try:
+        await client.update_agent_bridge(
+            agent_id,
+            custom_llm_url=bridge_base,
+            bridge_secret=secret,
+            first_message=ov.get("greeting") or persona.get("greeting"),
+            fillers=ov.get("fillers") or persona.get("fillers"),
+            voice_id=voice_id or settings.get("voice_id"),
+            request_headers=bridge_headers,
+            overrides=persona_config.elevenlabs_overrides(settings),
+        )
+    except ElevenLabsError as exc:
+        raise SetupError(f"Could not update the agent: {exc}", 502) from exc
+
+    settings.update({
+        # Fall back to the live identity name so a failed persona fetch still
+        # converges (otherwise every /session would retry the resync forever).
+        "persona_name": persona.get("name") or await identity.live_name(ctx),
+        "greeting": persona.get("greeting"),
+        "fillers": persona.get("fillers"),
+    })
+    if voice_id:
+        settings["voice_id"] = voice_id
+    await save_settings(ctx, settings)
+    return settings

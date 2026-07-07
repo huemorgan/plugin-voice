@@ -22,7 +22,7 @@ def _manifest():
 def test_toml_and_manifest_agree():
     toml, manifest = _toml(), _manifest()
     assert toml["name"] == manifest.name == "plugin-voice"
-    assert toml["version"] == manifest.version == "0.3.4"
+    assert toml["version"] == manifest.version == "0.4.0"
     assert toml["entry"] == "plugin_voice"
     assert toml["description"] == manifest.description
 
@@ -56,9 +56,11 @@ def test_widget_declared():
 
 def test_settings_tab_declared():
     tabs = _manifest().settings_tabs
-    assert len(tabs) == 1
+    assert len(tabs) == 2
     assert tabs[0].id == "voice"
     assert tabs[0].iframe_src == "/api/p/plugin-voice/ui/settings/"
+    assert tabs[1].id == "voice-persona"
+    assert tabs[1].iframe_src == "/api/p/plugin-voice/ui/settings/persona/"
 
 
 def test_widget_files_shipped():
@@ -67,6 +69,7 @@ def test_widget_files_shipped():
     assert (widget_dir / "index.html").is_file()
     assert (widget_dir / "elevenlabs-client.js").is_file()
     assert (PKG / "ui" / "settings" / "index.html").is_file()
+    assert (PKG / "ui" / "settings" / "persona" / "index.html").is_file()
 
 
 def test_no_luna_core_imports():

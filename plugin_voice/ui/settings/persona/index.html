@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice Persona — Settings</title>
+<style>
+  :root {
+    --fg:#eceaf6; --dim:#8f8ca6; --faint:#6b6880;
+    --card:#17151f; --card-edge:#26232f; --inset:#100e17;
+    --accent:#a78bfa; --accent-dim:#8b6cf0;
+    --ok:#2dd4bf; --err:#f87171; --warn:#fbbf24;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font: 14px/1.55 -apple-system,"Segoe UI",Roboto,sans-serif;
+    color: var(--fg); background: transparent;
+    padding: 20px 24px 32px; max-width: 640px;
+  }
+  h2 { font-size: 16px; font-weight: 650; letter-spacing: .01em; }
+  p.hint { color: var(--dim); font-size: 12.5px; margin: 6px 0 18px; max-width: 58ch; }
+  .card {
+    background: var(--card); border: 1px solid var(--card-edge);
+    border-radius: 14px; padding: 18px; margin-bottom: 14px;
+  }
+  .card > strong { font-size: 13.5px; font-weight: 650; letter-spacing: .01em; }
+  .card p.hint { margin: 4px 0 12px; }
+  label { display:block; color: var(--dim); font-size: 11.5px; text-transform: uppercase;
+          letter-spacing: .07em; margin: 12px 0 5px; }
+  input, select, textarea {
+    width: 100%; padding: 9px 11px; border-radius: 9px;
+    border: 1px solid var(--card-edge); background: var(--inset);
+    color: var(--fg); font-size: 13px; outline: none; font-family: inherit;
+  }
+  textarea { resize: vertical; min-height: 74px; line-height: 1.5; }
+  textarea.tall { min-height: 130px; }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent-dim); }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  button {
+    margin-top: 12px; border: 0; border-radius: 9px;
+    background: var(--accent); color: #14121f; font-weight: 650;
+    padding: 8px 16px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { background: var(--accent-dim); color: #fff; }
+  button:disabled { opacity: .55; cursor: default; }
+  button.ghost {
+    background: transparent; color: var(--dim);
+    border: 1px solid var(--card-edge);
+  }
+  button.ghost:hover { color: var(--fg); border-color: var(--faint); background: transparent; }
+  .btn-row { display: flex; gap: 8px; align-items: center; }
+  .field-note { color: var(--faint); font-size: 11.5px; margin-top: 4px; }
+  .auto-note { color: var(--ok); }
+  .override-note { color: var(--warn); }
+  details { margin-top: 6px; }
+  summary { cursor: pointer; color: var(--dim); font-size: 13px; font-weight: 600; }
+  summary:hover { color: var(--fg); }
+  #save-msg, #voice-msg { font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+  .status-ok { color: var(--ok); } .status-err { color: var(--err); }
+  .toggle { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .toggle input { width: auto; }
+  .toggle span { font-size: 13px; }
+  audio { width: 100%; margin-top: 10px; height: 32px; }
+</style>
+</head>
+<body>
+<h2>Voice Persona</h2>
+<p class="hint" id="who-line">How your agent sounds on a call — its voice, greeting, waiting
+words and the prompts that shape voice replies. Anything you leave on “auto” follows the
+agent's own personality and updates when it changes.</p>
+
+<div class="card">
+  <strong>Voice</strong>
+  <label>Text-to-speech voice</label>
+  <select id="voice" data-testid="persona-voice-select"><option value="">Agent default</option></select>
+  <audio id="preview" controls style="display:none"></audio>
+  <button id="save-voice" data-testid="persona-save-voice">Save voice</button>
+  <div id="voice-msg"></div>
+</div>
+
+<div class="card">
+  <strong>Sentences it may use</strong>
+  <p class="hint">Leave blank to stay on auto — the agent writes these itself from its
+  personality (re-matched when it changes).</p>
+  <label>Greeting (spoken when a call starts)</label>
+  <textarea id="greeting" data-testid="persona-greeting" rows="2" placeholder="auto — from the agent's personality"></textarea>
+  <div class="field-note" id="greeting-note"></div>
+  <label>Waiting phrases — one per line, up to 5 (spoken while it works)</label>
+  <textarea id="fillers" data-testid="persona-fillers" placeholder="auto — from the agent's personality"></textarea>
+  <div class="field-note" id="fillers-note"></div>
+</div>
+
+<div class="card">
+  <strong>Timing</strong>
+  <div class="grid2">
+    <div>
+      <label>Silence before a filler (s)</label>
+      <input id="soft_timeout_seconds" data-testid="persona-soft-timeout" type="number" min="1" max="30" step="0.5" />
+    </div>
+    <div>
+      <label>Max fillers per reply</label>
+      <input id="max_soft_timeouts" data-testid="persona-max-timeouts" type="number" min="0" max="10" step="1" />
+    </div>
+    <div>
+      <label>Turn taking</label>
+      <select id="turn_eagerness" data-testid="persona-eagerness"></select>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <strong>Prompts</strong>
+  <p class="hint">The exact instructions behind voice replies. Edit freely — “Reset all”
+  below restores the shipped text.</p>
+  <details open>
+    <summary>Voice style prompt (every reply)</summary>
+    <textarea id="voice_system_prompt" data-testid="persona-voice-prompt" class="tall"></textarea>
+  </details>
+  <details>
+    <summary>Open-mic triage (decides whether to answer at all)</summary>
+    <div class="toggle">
+      <input type="checkbox" id="triage_enabled" data-testid="persona-triage-enabled" />
+      <span>Gate room chatter with a fast pre-check (recommended for open mic)</span>
+    </div>
+    <textarea id="triage_system" data-testid="persona-triage-prompt" class="tall"></textarea>
+  </details>
+  <details>
+    <summary>ElevenLabs passthrough prompt (advanced)</summary>
+    <textarea id="passthrough_prompt" data-testid="persona-passthrough-prompt"></textarea>
+  </details>
+</div>
+
+<div class="btn-row">
+  <button id="save" data-testid="persona-save">Save persona settings</button>
+  <button id="reset" class="ghost" data-testid="persona-reset">Reset all to defaults</button>
+</div>
+<div id="save-msg"></div>
+
+<script>
+(function () {
+  "use strict";
+  // Hosted tenants serve this page under /a/{slug}/api/p/… — derive the base
+  // from the pathname so API calls keep the tenant prefix.
+  var BASE = location.pathname.split("/api/p/plugin-voice")[0] || "";
+  var API = BASE + "/api/p/plugin-voice";
+  function $(id) { return document.getElementById(id); }
+  function msg(el, text, ok) { el.textContent = text; el.className = ok ? "status-ok" : "status-err"; }
+
+  var token = new URLSearchParams(location.search).get("token") || "";
+  window.addEventListener("message", function (e) {
+    if (e.origin === location.origin && e.data && e.data.type === "luna-auth" && e.data.token) {
+      token = e.data.token;
+    }
+  });
+  try { window.parent.postMessage({ type: "luna-request-auth" }, location.origin); } catch (e) {}
+
+  async function call(path, opts) {
+    opts = Object.assign({ credentials: "include" }, opts || {});
+    opts.headers = Object.assign({}, opts.headers || {});
+    if (token) { opts.headers["Authorization"] = "Bearer " + token; }
+    var resp = await fetch(API + path, opts);
+    var body = null;
+    try { body = await resp.json(); } catch (e) {}
+    if (!resp.ok) {
+      var detail = body && body.detail;
+      if (detail && typeof detail !== "string") { detail = JSON.stringify(detail); }
+      throw new Error(detail || ("HTTP " + resp.status));
+    }
+    return body;
+  }
+
+  var state = null; // last GET /persona-settings payload
+
+  function fillForm(s) {
+    state = s;
+    var ov = s.overrides || {};
+    var v = s.values || {};
+    if (s.persona_name) {
+      $("who-line").textContent = "How " + s.persona_name + " sounds on a call — voice, greeting, "
+        + "waiting words and the prompts behind voice replies. “Auto” fields follow its personality.";
+    }
+    // greeting / fillers: show the override if set, else placeholder=auto value
+    $("greeting").value = ov.greeting || "";
+    $("greeting").placeholder = (s.auto && s.auto.greeting) || "auto — from the agent's personality";
+    $("greeting-note").textContent = ov.greeting
+      ? "Overridden — clear the box and save to go back to auto."
+      : "Auto: " + ((s.auto && s.auto.greeting) || "neutral greeting");
+    $("greeting-note").className = "field-note " + (ov.greeting ? "override-note" : "auto-note");
+    $("fillers").value = (ov.fillers || []).join("\n");
+    var autoFill = (s.auto && s.auto.fillers) || [];
+    $("fillers").placeholder = autoFill.length ? autoFill.join("\n") : "auto — from the agent's personality";
+    $("fillers-note").textContent = (ov.fillers && ov.fillers.length)
+      ? "Overridden — clear the box and save to go back to auto."
+      : (autoFill.length ? "Auto: " + autoFill.join(" · ") : "Auto (neutral phrases)");
+    $("fillers-note").className = "field-note " + ((ov.fillers && ov.fillers.length) ? "override-note" : "auto-note");
+
+    $("soft_timeout_seconds").value = v.soft_timeout_seconds;
+    $("max_soft_timeouts").value = v.max_soft_timeouts;
+    var sel = $("turn_eagerness");
+    sel.innerHTML = "";
+    (s.turn_eagerness_values || ["eager", "normal", "patient"]).forEach(function (opt) {
+      var o = document.createElement("option");
+      o.value = opt; o.textContent = opt;
+      sel.appendChild(o);
+    });
+    sel.value = v.turn_eagerness;
+    $("voice_system_prompt").value = v.voice_system_prompt || "";
+    $("triage_enabled").checked = !!v.triage_enabled;
+    $("triage_system").value = v.triage_system || "";
+    $("passthrough_prompt").value = v.passthrough_prompt || "";
+  }
+
+  function collectChanges() {
+    var d = state.defaults || {};
+    var body = {};
+    body.greeting = $("greeting").value.trim() || null; // null → auto
+    var lines = $("fillers").value.split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
+    body.fillers = lines.length ? lines.slice(0, 5) : null;
+    body.soft_timeout_seconds = parseFloat($("soft_timeout_seconds").value);
+    body.max_soft_timeouts = parseInt($("max_soft_timeouts").value, 10);
+    body.turn_eagerness = $("turn_eagerness").value;
+    body.triage_enabled = $("triage_enabled").checked;
+    // prompts: identical-to-default (or blank) → null clears the override
+    ["voice_system_prompt", "triage_system", "passthrough_prompt"].forEach(function (f) {
+      var val = $(f).value.trim();
+      body[f] = (!val || val === d[f]) ? null : val;
+    });
+    if (body.soft_timeout_seconds === d.soft_timeout_seconds) { body.soft_timeout_seconds = null; }
+    if (body.max_soft_timeouts === d.max_soft_timeouts) { body.max_soft_timeouts = null; }
+    if (body.turn_eagerness === d.turn_eagerness) { body.turn_eagerness = null; }
+    if (body.triage_enabled === d.triage_enabled) { body.triage_enabled = null; }
+    return body;
+  }
+
+  $("save").addEventListener("click", async function () {
+    var b = $("save");
+    try {
+      b.disabled = true;
+      var out = await call("/persona-settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(collectChanges()),
+      });
+      msg($("save-msg"),
+          out.applied_to_agent
+            ? "✓ Saved and applied — takes effect on the next call."
+            : "✓ Saved — voice-side changes apply once the agent is connected.",
+          true);
+      fillForm(await call("/persona-settings"));
+    } catch (e) { msg($("save-msg"), e.message, false); }
+    finally { b.disabled = false; }
+  });
+
+  var resetArmed = null;
+  $("reset").addEventListener("click", async function () {
+    var b = $("reset");
+    if (!resetArmed) {
+      b.textContent = "Really reset everything?";
+      b.style.color = "var(--err)"; b.style.borderColor = "var(--err)";
+      resetArmed = setTimeout(function () {
+        resetArmed = null; b.textContent = "Reset all to defaults";
+        b.style.color = ""; b.style.borderColor = "";
+      }, 4000);
+      return;
+    }
+    clearTimeout(resetArmed); resetArmed = null;
+    b.textContent = "Reset all to defaults"; b.style.color = ""; b.style.borderColor = "";
+    try {
+      var clear = {};
+      Object.keys(state.defaults || {}).forEach(function (f) { clear[f] = null; });
+      await call("/persona-settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(clear),
+      });
+      msg($("save-msg"), "✓ Back to defaults (greeting and phrases back on auto).", true);
+      fillForm(await call("/persona-settings"));
+    } catch (e) { msg($("save-msg"), e.message, false); }
+  });
+
+  // ---- voice picker (same endpoints the Voice tab uses) ----
+  async function loadVoices(selected) {
+    try {
+      var data = await call("/voices");
+      var sel = $("voice");
+      sel.innerHTML = '<option value="">Agent default</option>';
+      data.voices.forEach(function (v) {
+        var o = document.createElement("option");
+        o.value = v.voice_id;
+        o.textContent = v.name + (v.category ? " (" + v.category + ")" : "");
+        o.dataset.preview = v.preview_url || "";
+        sel.appendChild(o);
+      });
+      if (selected) { sel.value = selected; }
+    } catch (e) { /* not connected — picker stays empty */ }
+  }
+
+  $("voice").addEventListener("change", function () {
+    var opt = this.selectedOptions[0];
+    var url = opt && opt.dataset.preview;
+    var audio = $("preview");
+    if (url) { audio.src = url; audio.style.display = "block"; audio.play().catch(function(){}); }
+    else { audio.pause(); audio.style.display = "none"; }
+  });
+
+  $("save-voice").addEventListener("click", async function () {
+    try {
+      await call("/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ voice_id: $("voice").value || null }),
+      });
+      msg($("voice-msg"), "Saved — applies to the next call.", true);
+    } catch (e) { msg($("voice-msg"), e.message, false); }
+  });
+
+  (async function init() {
+    try {
+      var s = await call("/persona-settings");
+      fillForm(s);
+      loadVoices(s.voice_id);
+    } catch (e) {
+      msg($("save-msg"), "Could not load persona settings: " + e.message, false);
+    }
+  })();
+})();
+</script>
+</body>
+</html>

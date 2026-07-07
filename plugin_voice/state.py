@@ -67,3 +67,33 @@ def recent_speaker(max_age: float = 10.0) -> tuple[str, float] | None:
 def reset_speaker() -> None:
     global _last_speaker
     _last_speaker = None
+
+
+# 004: one background persona resync at a time — /session fires it when the
+# agent's live name no longer matches what the greeting was generated for.
+# The task reference is kept so it can't be garbage-collected mid-flight
+# (asyncio only holds a weak ref to tasks) and so tests can await it.
+_resync_inflight = False
+_resync_task = None
+
+
+def try_begin_resync() -> bool:
+    global _resync_inflight
+    if _resync_inflight:
+        return False
+    _resync_inflight = True
+    return True
+
+
+def end_resync() -> None:
+    global _resync_inflight
+    _resync_inflight = False
+
+
+def set_resync_task(task) -> None:
+    global _resync_task
+    _resync_task = task
+
+
+def resync_task():
+    return _resync_task
