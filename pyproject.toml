@@ -1,6 +1,6 @@
 [project]
 name = "plugin-voice"
-version = "0.4.1"
+version = "0.4.2"
 description = "Talk to Luna by voice in the browser — ElevenLabs Agents front-end, Luna stays the brain."
 readme = "README.md"
 requires-python = ">=3.11"

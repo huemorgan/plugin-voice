@@ -55,7 +55,7 @@
   details { margin-top: 6px; }
   summary { cursor: pointer; color: var(--dim); font-size: 13px; font-weight: 600; }
   summary:hover { color: var(--fg); }
-  #save-msg, #voice-msg { font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+  #save-msg, #voice-msg, #persona-msg { font-size: 12.5px; margin-top: 10px; min-height: 16px; }
   .status-ok { color: var(--ok); } .status-err { color: var(--err); }
   .toggle { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
   .toggle input { width: auto; }
@@ -104,6 +104,14 @@ agent's own personality and updates when it changes.</p>
   <label>Waiting phrases — one per line, up to 5 (spoken while it works)</label>
   <textarea id="fillers" data-testid="persona-fillers" placeholder="auto — from the agent's personality"></textarea>
   <div class="field-note" id="fillers-note"></div>
+</div>
+
+<div class="card">
+  <strong>Personality</strong>
+  <p class="hint" style="margin-top:4px">Changed your agent's personality? Re-ask it for its
+  greeting, waiting words and best-fitting voice.</p>
+  <button id="refresh-persona" data-testid="voice-refresh-persona">Re-match voice &amp; words to personality</button>
+  <div id="persona-msg"></div>
 </div>
 
 <div class="card">
@@ -317,6 +325,19 @@ agent's own personality and updates when it changes.</p>
     var audio = $("preview");
     if (url) { audio.src = url; audio.style.display = "block"; audio.play().catch(function(){}); }
     else { audio.pause(); audio.style.display = "none"; }
+  });
+
+  $("refresh-persona").addEventListener("click", async function () {
+    var b = $("refresh-persona");
+    try {
+      b.disabled = true; b.textContent = "Asking your agent…";
+      var st = await call("/refresh-persona", { method: "POST" });
+      var s = await call("/persona-settings");
+      fillForm(s);
+      await loadVoices(s.voice_id);
+      msg($("persona-msg"), "✓ Updated — " + (st.persona_name || "agent") + " chose its greeting, waiting words and voice.", true);
+    } catch (e) { msg($("persona-msg"), e.message, false); }
+    finally { b.disabled = false; b.textContent = "Re-match voice & words to personality"; }
   });
 
   $("save-voice").addEventListener("click", async function () {

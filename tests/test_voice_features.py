@@ -269,8 +269,11 @@ def test_session_includes_persona_name(client, ctx):
 def test_ui_carries_new_affordances(client):
     settings_html = client.get("/api/p/plugin-voice/ui/settings/").text
     assert 'data-testid="voice-imprint-test"' in settings_html
-    assert 'data-testid="voice-refresh-persona"' in settings_html
     assert "Really delete" in settings_html and "rec-meter" in settings_html
+    # 004.2: the re-match button lives on the Persona page now
+    persona_html = client.get("/api/p/plugin-voice/ui/settings/persona/").text
+    assert 'data-testid="voice-refresh-persona"' in persona_html
+    assert 'data-testid="voice-refresh-persona"' not in settings_html
     widget_html = client.get("/api/p/plugin-voice/ui/widgets/voice/").text
     assert "agentName" in widget_html and "BroadcastChannel" in widget_html
     assert "Luna is speaking" not in widget_html

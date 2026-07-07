@@ -143,14 +143,6 @@ otherwise paste your own.</p>
   <div id="imprint-msg"></div>
 </div>
 
-<div class="card" style="display:none">
-  <strong>Personality</strong>
-  <p class="hint" style="margin-top:4px">Changed your agent's personality? Re-ask it for its
-  greeting, waiting words and best-fitting voice.</p>
-  <button id="refresh-persona" data-testid="voice-refresh-persona">Re-match voice &amp; words to personality</button>
-  <div id="persona-msg"></div>
-</div>
-
 <script>
 (function () {
   "use strict";
@@ -483,18 +475,6 @@ otherwise paste your own.</p>
       }
     } catch (e) { msg($("imprint-msg"), e.message, false); }
     finally { b.disabled = false; b.textContent = "Test my voice"; }
-  });
-
-  $("refresh-persona").addEventListener("click", async function () {
-    var b = $("refresh-persona");
-    try {
-      b.disabled = true; b.textContent = "Asking your agent\u2026";
-      var st = await call("/refresh-persona", { method: "POST" });
-      renderStatus(st);
-      await loadVoices(st.voice_id);
-      msg($("persona-msg"), "\u2713 Updated \u2014 " + (st.persona_name || "agent") + " chose its greeting, waiting words and voice.", true);
-    } catch (e) { msg($("persona-msg"), e.message, false); }
-    finally { b.disabled = false; b.textContent = "Re-match voice & words to personality"; }
   });
 
   refresh();
