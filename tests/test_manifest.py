@@ -22,7 +22,7 @@ def _manifest():
 def test_toml_and_manifest_agree():
     toml, manifest = _toml(), _manifest()
     assert toml["name"] == manifest.name == "plugin-voice"
-    assert toml["version"] == manifest.version == "0.4.0"
+    assert toml["version"] == manifest.version == "0.4.1"
     assert toml["entry"] == "plugin_voice"
     assert toml["description"] == manifest.description
 
@@ -55,12 +55,11 @@ def test_widget_declared():
 
 
 def test_settings_tab_declared():
+    """ONE shell tab; the Setup/Persona switch is inside the page (004.1)."""
     tabs = _manifest().settings_tabs
-    assert len(tabs) == 2
+    assert len(tabs) == 1
     assert tabs[0].id == "voice"
     assert tabs[0].iframe_src == "/api/p/plugin-voice/ui/settings/"
-    assert tabs[1].id == "voice-persona"
-    assert tabs[1].iframe_src == "/api/p/plugin-voice/ui/settings/persona/"
 
 
 def test_widget_files_shipped():

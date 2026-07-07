@@ -76,9 +76,25 @@
 
   #rec-meter { height: 6px; border-radius: 3px; background: var(--inset); margin-top: 10px; overflow: hidden; }
   #rec-level { height: 100%; width: 0%; background: var(--ok); transition: width .08s; }
+
+  /* 004.1: one settings tab in the shell; Setup/Persona switch lives here */
+  nav.tabs { display: flex; gap: 4px; margin-bottom: 18px;
+             border-bottom: 1px solid var(--card-edge); }
+  nav.tabs a { color: var(--dim); text-decoration: none; font-size: 13px; font-weight: 600;
+               padding: 7px 14px 9px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  nav.tabs a:hover { color: var(--fg); }
+  nav.tabs a.active { color: var(--accent); border-bottom-color: var(--accent); }
 </style>
 </head>
 <body>
+<nav class="tabs">
+  <a class="active" href="#" data-testid="voice-tab-setup">Setup</a>
+  <a id="tab-persona" href="persona/" data-testid="voice-tab-persona">Persona</a>
+</nav>
+<script>
+  // carry the shell's ?token= across the in-page tab switch
+  document.getElementById("tab-persona").href = "persona/" + location.search;
+</script>
 <h2>Voice — powered by ElevenLabs (11labs)</h2>
 <p class="hint">Audio runs on your ElevenLabs (11labs) key; your agent stays the brain and audio
 never touches your Luna server. If the platform already provides an 11labs key, setup is one click —

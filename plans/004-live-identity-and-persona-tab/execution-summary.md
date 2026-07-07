@@ -1,6 +1,10 @@
 # 004 — Execution summary
 
-Shipped in **0.4.0**. All plan items landed.
+Shipped in **0.4.0**; **0.4.1** folded the persona editor back into the single
+"Voice" settings entry (owner feedback: one plugin, one left-pane item). The
+shell declares ONE SettingsTab; a Setup/Persona tab switcher inside the page
+navigates between `ui/settings/` and `ui/settings/persona/`, carrying the
+shell's `?token=` across the switch.
 
 ## What changed
 

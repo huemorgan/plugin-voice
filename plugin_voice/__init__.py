@@ -26,7 +26,7 @@ class VoicePlugin(LunaPlugin):
         name="plugin-voice",
         shown_name="Voice",
         icon="mic",
-        version="0.4.0",
+        version="0.4.1",
         description=(
             "Voice conversations that know who is speaking — owner voice "
             "imprint, personality-matched voice and fillers, ElevenLabs "
@@ -36,21 +36,14 @@ class VoicePlugin(LunaPlugin):
         depends_on=["plugin-vault"],
         routes_module="routes",
         settings_tabs=[
+            # ONE tab; the page itself has a Setup/Persona switcher (004.1) —
+            # the persona editor lives at ui/settings/persona/ inside it.
             SettingsTab(
                 id="voice",
                 label="Voice",
                 icon="mic",
                 sort_order=75,
                 iframe_src="/api/p/plugin-voice/ui/settings/",
-            ),
-            # 004: every voice-persona knob that used to be hardcoded —
-            # greeting, fillers, prompts, timing — owner-editable.
-            SettingsTab(
-                id="voice-persona",
-                label="Voice Persona",
-                icon="drama",
-                sort_order=76,
-                iframe_src="/api/p/plugin-voice/ui/settings/persona/",
             ),
         ],
         # WidgetSlot isn't re-exported from luna_sdk yet (only SettingsTab is);

@@ -61,9 +61,25 @@
   .toggle input { width: auto; }
   .toggle span { font-size: 13px; }
   audio { width: 100%; margin-top: 10px; height: 32px; }
+
+  /* 004.1: one settings tab in the shell; Setup/Persona switch lives here */
+  nav.tabs { display: flex; gap: 4px; margin-bottom: 18px;
+             border-bottom: 1px solid var(--card-edge); }
+  nav.tabs a { color: var(--dim); text-decoration: none; font-size: 13px; font-weight: 600;
+               padding: 7px 14px 9px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  nav.tabs a:hover { color: var(--fg); }
+  nav.tabs a.active { color: var(--accent); border-bottom-color: var(--accent); }
 </style>
 </head>
 <body>
+<nav class="tabs">
+  <a id="tab-setup" href="../" data-testid="voice-tab-setup">Setup</a>
+  <a class="active" href="#" data-testid="voice-tab-persona">Persona</a>
+</nav>
+<script>
+  // carry the shell's ?token= across the in-page tab switch
+  document.getElementById("tab-setup").href = "../" + location.search;
+</script>
 <h2>Voice Persona</h2>
 <p class="hint" id="who-line">How your agent sounds on a call — its voice, greeting, waiting
 words and the prompts that shape voice replies. Anything you leave on “auto” follows the
