@@ -220,7 +220,9 @@ def register_routes(app, ctx):
         try:
             minted = await rt_client.mint_client_secret(session_cfg)
         except RealtimeError as exc:
-            raise HTTPException(502, str(exc)) from exc
+            # 400, not 502: hosted edges replace 5xx JSON bodies with HTML
+            # error pages, which hides the actionable message from the widget.
+            raise HTTPException(400, str(exc)) from exc
         finally:
             await rt_client.close()
 

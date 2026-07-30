@@ -95,7 +95,12 @@ async def test_mint_happy_path():
 
 @pytest.mark.parametrize(
     ("status", "needle"),
-    [(401, "rejected the key"), (404, "may not support Realtime"), (500, "HTTP 500")],
+    [
+        (401, "rejected the key"),
+        (402, "paste your own OpenAI API key"),
+        (404, "may not support Realtime"),
+        (500, "HTTP 500"),
+    ],
 )
 async def test_mint_errors_are_speakable(status, needle):
     rc = _client_with(lambda request: httpx.Response(status, json={}))
@@ -249,11 +254,13 @@ def test_rt_session_live_token_when_imprinted(client, ctx, rt):
     assert "[voice check:" in FakeRT.last_session["instructions"]
 
 
-def test_rt_session_mint_failure_is_502(client, ctx, rt):
+def test_rt_session_mint_failure_is_400_with_detail(client, ctx, rt):
+    """400, not 502 — hosted edges replace 5xx JSON bodies with HTML pages,
+    which would hide the actionable message from the widget."""
     ctx.vault.data[VAULT_OPENAI_KEY] = "sk-own"
     rt.fail = RealtimeError("OpenAI rejected the key (HTTP 401) — check it in Settings → Voice")
     resp = client.get("/api/p/plugin-voice/rt/session")
-    assert resp.status_code == 502
+    assert resp.status_code == 400
     assert "rejected the key" in resp.json()["detail"]
     assert rt.instances and rt.instances[-1].closed  # client closed on failure too
 

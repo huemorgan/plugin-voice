@@ -137,6 +137,14 @@ class RealtimeClient:
             raise RealtimeError(f"OpenAI unreachable: {type(exc).__name__}") from exc
         if resp.status_code == 401:
             raise RealtimeError("OpenAI rejected the key (HTTP 401) — check it in Settings → Voice")
+        if resp.status_code == 402:
+            # Platform-managed billing can't meter realtime audio (it flows
+            # browser ⇄ OpenAI, never through the gateway), so gateway keys
+            # are refused for it.
+            raise RealtimeError(
+                "The platform-managed key doesn't cover realtime voice — "
+                "paste your own OpenAI API key in Settings → Voice"
+            )
         if resp.status_code in (403, 404):
             # A gateway/proxy base_url that doesn't pass Realtime through.
             raise RealtimeError(
