@@ -27,7 +27,7 @@ The pane opens **like a left-pane page but with no left-pane link** — it exist
 
 The WebRTC session (mic + Luna's remote stream) lives in the **widget iframe** and must not restart when the pane opens. `MediaStream`s can't cross iframes, so the pane never touches audio directly:
 
-- Widget broadcasts a viz feed on `BroadcastChannel("plugin-voice-viz")` at ~30Hz: `{ state, userLevel, lunaLevel, muted, owner }` — trivially cheap.
+- Widget broadcasts a viz feed on `BroadcastChannel("plugin-voice-viz")` at ~30Hz: `{ state, userLevel, lunaLevel, muted, owner }` — trivially cheap. `state ∈ idle | connecting | listening | thinking | speaking` (connecting drives the swarm choreography).
 - The pane is a pure renderer of that feed and sends commands back on the same channel: `{cmd:"start"}`, `{cmd:"end"}`, `{cmd:"mute", on}`.
 - If no session owner responds to a `{cmd:"ping"}` within ~300ms, the pane starts the session itself (it ships the same `rt-client.js`) and becomes the feed owner. Single-owner rule: widget wins if both are alive (same pattern as the existing `enroll-start` pause message).
 
@@ -58,11 +58,17 @@ Reactions arrive as feed events: `{event:"react", shape:"heart"|"thumbs"|"rocket
 
 ## Phases
 
-### Phase 1 — Mock revision (validate before product code)
+### Phase 1 — Mock revision (validate before product code) — DONE
 
 In `mock/index.html`: remove shape chips, add auto choreography + transient state labels, replace confetti rain with the fireworks burst system (~3k points, shells + fade, 2.5s). Keep the dev state/audio chips behind `?debug=1`.
 
-**Exit criteria**: fireworks read as fireworks and finish snappy; labels fade correctly during rapid full-duplex state flips; still 60fps.
+**Exit criteria**: fireworks read as fireworks and finish snappy; labels fade correctly during rapid full-duplex state flips; still 60fps. ✓ verified in browser (commit 981ee56).
+
+> retro(phase 1): learnings folded into phases 3–4 —
+> - Fireworks is a **shader overlay**, not a shape morph: `uFw` (ramp) + `uFwT` (burst clock), sparks = `fract(seed*7.31) < 0.125`, 3 bursts staggered 0.34s, rise 0.40s, expansion `1-exp(-2.8t)`, droop `0.16t²`, fade `smoothstep(0.9,1.5,et)` with twinkle. First cut used 4 bursts + 0.40 droop and read as falling dust — keep the tuned constants.
+> - The feed contract needs a **"connecting"** state (drives the swarm choreography between Talk and live) — it's a real session phase, not just a mock artifact.
+> - `person` and `cloud` targets are dropped from the product pane (exploration shapes; the pane ships orb/swarm/face + 4 gestures + fireworks overlay).
+> - `setShape` early-returns on same-name calls — reaction revert relies on it; keep in the pane port.
 
 ### Phase 2 — luna core (separate repo, small PR)
 
