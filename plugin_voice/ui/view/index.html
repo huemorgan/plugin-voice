@@ -104,7 +104,7 @@
   <div id="hint" data-testid="view-hint"></div>
 </div>
 <div id="fps"></div>
-<div id="err">WebGL2 is not available in this browser.</div>
+<div id="err">This view needs WebGL2, which this browser doesn't offer — the Voice widget in the sidebar still works for talking.</div>
 <div id="bar">
   <div class="row debug-row" id="reactions">
     <span class="lbl">React</span>
@@ -419,7 +419,8 @@ function setShape(name, now) {
   gl.bindBuffer(gl.ARRAY_BUFFER, bufTo);   gl.bufferSubData(gl.ARRAY_BUFFER, 0, toArr);
   gl.bindBuffer(gl.ARRAY_BUFFER, bufJaw);
   gl.bufferSubData(gl.ARRAY_BUFFER, 0, name === "face" && faceJaw ? faceJaw : zeroJaw);
-  morphStart = now;
+  // reduced motion: shapes cut, they don't fly
+  morphStart = REDUCED ? now - MORPH_MS : now;
 }
 
 // ------------------------------------------------------------- state/colors →
@@ -456,10 +457,13 @@ function flashHint(text, isErr, ms) {
   hintTimer = setTimeout(function () { hintEl.classList.remove("show"); }, ms || 4000);
 }
 
+var shiverUntil = 0;
 function setState(s) {
   if (!STATES[s] || s === state) return;
+  var wasError = state === "error";
   state = s;
   flashLabel(STATES[s].label);
+  if (s === "error" && !wasError) shiverUntil = performance.now() + 700;
   var want = baseShape();
   if (!reacting()) setShape(want, performance.now());
 }
@@ -477,7 +481,12 @@ function fireworks() {
 // ---------------------------------------------------------------- reactions →
 var reactTimer = 0, reactUntil = 0;
 function reacting() { return performance.now() < reactUntil; }
+// prefers-reduced-motion: a calm, near-static dim orb — no drift, no sway,
+// no voice trembling. Explicit reactions (user/Luna asked) still morph.
+var REDUCED = false;
+try { REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) {}
 function baseShape() {
+  if (REDUCED) return "orb";
   if (state === "connecting") return "swarm";
   if (state === "idle" || state === "error") return "orb";
   return "face";
@@ -724,9 +733,9 @@ window.addEventListener("pointermove", function (e) {
 });
 
 // -------------------------------------------------------------------- frame →
-var dpr = 1;
+var dpr = 1, dprCap = 2;
 function resize() {
-  dpr = Math.min(2, window.devicePixelRatio || 1);
+  dpr = Math.min(dprCap, window.devicePixelRatio || 1);
   canvas.width = innerWidth * dpr;
   canvas.height = innerHeight * dpr;
   gl.viewport(0, 0, canvas.width, canvas.height);
@@ -738,11 +747,24 @@ var fpsEl = document.getElementById("fps");
 var fps = 60, lastT = performance.now(), fpsTick = 0;
 var raf = 0;
 
+// perf governor: 60 consecutive frames under ~45fps → drop DPR to 1 first,
+// then halve the drawn point count (floor 6k). Never recovers upward — a
+// machine that struggled once will struggle again.
+var DRAW_N = N, badFrames = 0;
+function perfGovern(dt) {
+  badFrames = dt > 22 ? badFrames + 1 : 0;
+  if (badFrames < 60) return;
+  badFrames = 0;
+  if (dpr > 1) { dprCap = 1; resize(); }
+  else if (DRAW_N > 6000) { DRAW_N = DRAW_N >> 1; }
+}
+
 function frame(now) {
   raf = requestAnimationFrame(frame);
   var dt = Math.min(50, now - lastT); lastT = now;
   fps += (1000 / Math.max(1, dt) - fps) * 0.05;
-  if (DEBUG && now > fpsTick) { fpsEl.textContent = Math.round(fps) + " FPS · " + (N/1000) + "k points"; fpsTick = now + 500; }
+  perfGovern(dt);
+  if (DEBUG && now > fpsTick) { fpsEl.textContent = Math.round(fps) + " FPS · " + (DRAW_N/1000) + "k points"; fpsTick = now + 500; }
 
   // level inputs: own analysers when owning, feed values otherwise
   var uRaw, lRaw;
@@ -756,6 +778,9 @@ function frame(now) {
   lunaLevel += (lRaw - lunaLevel) * (lRaw > lunaLevel ? 0.55 : 0.18);
   var active = state === "speaking" ? lunaLevel : state === "listening" ? userLevel : 0;
   var mouth = state === "speaking" ? lunaLevel : 0;
+  // error entrance: a brief, decaying jolt through the wobble channel
+  if (now < shiverUntil) active = Math.max(active, (shiverUntil - now) / 700 * 0.9);
+  if (REDUCED) { active = 0; mouth = 0; }
 
   var tgt = STATES[state];
   for (var i = 0; i < 3; i++) {
@@ -770,18 +795,18 @@ function frame(now) {
   gl.clearColor(0, 0, 0, 0);
   gl.clear(gl.COLOR_BUFFER_BIT);
   gl.uniform1f(U.uMorph, morphT(now));
-  gl.uniform1f(U.uTime, now * 0.001);
+  gl.uniform1f(U.uTime, REDUCED ? 0 : now * 0.001);
   gl.uniform1f(U.uLevel, active);
   gl.uniform1f(U.uMouth, mouth);
-  gl.uniform1f(U.uPulse, pulse);
+  gl.uniform1f(U.uPulse, REDUCED ? 0 : pulse);
   gl.uniform1f(U.uAspect, innerWidth / innerHeight);
   gl.uniform1f(U.uSize, Math.max(2.2, innerHeight / 340) * dpr);
   gl.uniform1f(U.uFw, fw);
   gl.uniform1f(U.uFwT, (now - fwStart) * 0.001);
-  gl.uniform2f(U.uMouse, mouse[0], mouse[1]);
+  gl.uniform2f(U.uMouse, REDUCED ? 0 : mouse[0], REDUCED ? 0 : mouse[1]);
   gl.uniform3fv(U.uColorA, colA);
   gl.uniform3fv(U.uColorB, colB);
-  gl.drawArrays(gl.POINTS, 0, N);
+  gl.drawArrays(gl.POINTS, 0, DRAW_N);
 }
 
 document.addEventListener("visibilitychange", function () {

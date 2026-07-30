@@ -76,6 +76,13 @@ In `mock/index.html`: remove shape chips, add auto choreography + transient stat
 - Generic `luna-open-section` message handler in `Shell.tsx`.
 - Unit test: hidden section renders via `setSection`, absent from both nav lists.
 
+> retro(phase 3): scope check against the LIVE core (my-projects/luna, v0.53) — it already has
+> `SidebarSection.path` and the webui passes it through (newer than the luna-service submodule
+> snapshot). Phase 2 therefore shrinks to exactly: `hidden` field + pass-through + nav filtering
+> (sections must STAY in the pluginSections registry so `setSection('plugin:luna-view')` still
+> resolves — filter only the nav lists), + the `luna-open-section` window-message handler.
+> Blocked on the user assigning a luna plan number (luna-submodule-changes skill).
+
 ### Phase 3 — plugin-voice 0.6.0
 
 - `ui/view/index.html` pane from the revised mock + `head.bin` + shared `rt-client.js`.
@@ -84,6 +91,20 @@ In `mock/index.html`: remove shape chips, add auto choreography + transient stat
 - Manifest: `sidebar_sections=[{id:"luna-view", label:"Luna", icon:"sparkles", path:"ui/view/", hidden:true}]`.
 - Version bump **0.5.2 → 0.6.0** in BOTH `luna-plugin.toml` and `PluginManifest`; `[requires]`/tools unchanged unless `luna_view_react` lands as a registered tool.
 - Unit loop per repo rules (uv + 3.12, manifest-sync tests, no `luna.*` imports); then live browser test: widget → expand → pane, talk, mute, reaction, close.
+
+> retro(phase 3): DONE (commit 2f0fb4c, v0.6.0, 142 tests green) — learnings for phases 2/4:
+> - Today's shells hardcode pane iframes to `/api/p/<plugin>/ui/`, so routes.py grew a `/ui/`
+>   **catch-all serving the view** (registered last; widget/settings routes still win). This makes
+>   the visible-"Luna"-link fallback fully functional on current cores — Phase 2 is now purely
+>   cosmetic/UX (hide the link, wire the expand button), not a functionality gate.
+> - `luna_view_react` ships as a mint-time schema only (`tool_names` includes it; `/rt/tool`
+>   answers a quiet `{ok:true}` for old cached clients). `[requires] tools` stays 2.
+> - E2E verified in a real local Luna (port 3000): pane at 60 FPS/24k points, heart morph +
+>   fireworks overlay, error surfacing (mic blocked, setup needed) all good. **A real duplex call
+>   cannot be automated**: CDP `grantPermissions` satisfies `permissions.query` but not actual
+>   capture in headed Chrome — the talk/mute/handoff loop is live-walkthrough territory.
+> - Local test loop: rsync the package over `~/.luna/managed_plugins/plugin_voice/` (0.5.2 backup
+>   at `/tmp/plugin_voice.bak-052`) and restart `my-projects/luna` serve on :3000.
 
 ### Phase 4 — Polish
 
