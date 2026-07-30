@@ -73,12 +73,26 @@ async def build_status(ctx: Any) -> dict:
 
     settings = await settings_of(ctx)
     key_res = await openai_realtime.resolve_openai_key(ctx, vault_key=VAULT_OPENAI_KEY)
+    # A key that resolves is not a key that works: hosted gateway keys 402 on
+    # realtime minting (billing can't meter WebRTC audio), so status probes
+    # with the same call real sessions make and reports ready/key_error
+    # separately from connected.
+    ready = False
+    key_error = None
+    if key_res is not None:
+        try:
+            await _validate_key(key_res)
+            ready = True
+        except SetupError as exc:
+            key_error = str(exc)
     # The LIVE identity name wins — the stored snapshot is only what the
     # greeting was generated for and goes stale on rename.
     live = await identity.live_name(ctx)
     eff = persona_config.effective(settings)
     return {
         "connected": key_res is not None,
+        "ready": ready,
+        "key_error": key_error,
         "key_source": (key_res or {}).get("source"),
         "rt_voice": settings.get("rt_voice"),
         "rt_model": settings.get("rt_model") or openai_realtime.DEFAULT_MODEL,

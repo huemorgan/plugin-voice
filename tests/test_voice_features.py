@@ -267,6 +267,42 @@ def test_status_detects_gateway_key_without_pasted_key(client, ctx):
     )
     st = client.get(f"{API}/status").json()
     assert st["connected"] is True and st["key_source"] == "gateway"
+    # status probed the key with a real mint before claiming it works
+    assert st["ready"] is True and st["key_error"] is None
+
+
+def test_status_key_resolves_but_cannot_mint(client, ctx):
+    """The hosted-tenant case: the gateway key resolves, so it looks
+    'connected', but realtime minting 402s — status must not claim ready."""
+    import sys
+
+    from tests.conftest import FakeRT
+
+    sdk = sys.modules["luna_sdk"]
+    ctx.vault.gateway_connection = sdk.Connection(
+        base_url="https://gw.example.com/proxy/openai",
+        secret="devtok",
+        auth=sdk.AuthSpec(location="header", name="Authorization", scheme="Bearer"),
+        source="virtual",
+    )
+    FakeRT.fail_mint = True
+    st = client.get(f"{API}/status").json()
+    assert st["connected"] is True and st["key_source"] == "gateway"
+    assert st["ready"] is False
+    assert "check it in Settings" in st["key_error"]
+
+
+def test_status_without_any_key_is_not_ready(client):
+    st = client.get(f"{API}/status").json()
+    assert st["connected"] is False and st["ready"] is False
+    assert st["key_error"] is None
+
+
+def test_settings_page_keys_readiness_on_probe_not_resolution(client):
+    html = client.get(f"{API}/ui/settings/").text
+    # the paste field and status line follow s.ready, not s.connected
+    assert "!!s.ready" in html
+    assert "Voice can't start with" in html
 
 
 def test_connect_without_key_uses_gateway_connection(client, ctx):

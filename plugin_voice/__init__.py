@@ -25,7 +25,7 @@ class VoicePlugin(LunaPlugin):
         name="plugin-voice",
         shown_name="Voice",
         icon="mic",
-        version="0.5.1",
+        version="0.5.2",
         description=(
             "Full-duplex voice conversations that know who is speaking — "
             "OpenAI Realtime speech-to-speech in this agent's own persona, "

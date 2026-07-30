@@ -54,6 +54,12 @@ Luna to be publicly reachable. That path was removed in 0.5.0 — no bridge, no
 tunnel. [plugin-talk](https://github.com/huemorgan/plugin-talk) remains the
 ElevenLabs sibling if you prefer that stack.
 
+On hosted tenants the platform's gateway key cannot mint realtime sessions
+(billing can't meter WebRTC audio, which flows browser ⇄ OpenAI directly), so
+hosted voice needs your own pasted OpenAI key. Since 0.5.2 the Setup page
+probes the detected key with a real mint and says exactly why voice can't
+start, keeping the paste field available.
+
 ## Dojo
 
 `EL_KEY=sk_... .venv/bin/python tests/dojo/run_dojo.py` — synthesizes a

@@ -186,13 +186,19 @@ platform already provides an OpenAI key, setup is one click — otherwise paste 
   }
 
   function renderStatus(s) {
-    var ready = !!s.connected;
-    // the paste input is the fallback, not the front door: hidden while a
-    // platform key is available or once everything already works
+    // "connected" means a key resolves; "ready" means it actually minted a
+    // realtime session. Hosted gateway keys resolve but can't mint — the
+    // paste field must stay reachable whenever the key doesn't work.
+    var ready = !!s.ready;
     $("paste-block").style.display = ready ? "none" : "block";
     if (ready) {
       $("conn-status").textContent = "Connected via " + (SOURCE_LABEL[s.key_source] || "your key") + " — ready to talk";
       $("conn-status").className = "status-ok";
+      msg($("msg"), "", true);
+    } else if (s.connected) {
+      $("conn-status").textContent = "Voice can't start with " + (SOURCE_LABEL[s.key_source] || "the detected key");
+      $("conn-status").className = "status-err";
+      msg($("msg"), s.key_error || "The detected key can't mint a realtime session — paste your own OpenAI key below.", false);
     } else {
       $("conn-status").textContent = "Not connected";
       $("conn-status").className = "status-err";
@@ -234,10 +240,10 @@ platform already provides an OpenAI key, setup is one click — otherwise paste 
     try {
       var s = await call("/status");
       renderStatus(s);
-      if (s.connected) { await loadVoices(s); }
-      // no pasted key yet but a vault/gateway/env key exists → the connect
-      // button just blesses it (validates + fetches the persona)
-      var external = s.connected && s.key_source && s.key_source !== "own" && !s.persona_name;
+      if (s.ready) { await loadVoices(s); }
+      // no pasted key yet but a WORKING vault/gateway/env key exists → the
+      // connect button just blesses it (validates + fetches the persona)
+      var external = s.ready && s.key_source && s.key_source !== "own" && !s.persona_name;
       $("connect-gateway").style.display = external ? "inline-block" : "none";
       $("gateway-hint").style.display = external ? "block" : "none";
       if (external) {
