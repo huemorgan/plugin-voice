@@ -1,28 +1,34 @@
 name = "plugin-voice"
 shown_name = "Voice"
-version = "0.4.2"
-description = "Voice conversations that know who is speaking — owner voice imprint, personality-matched voice and fillers, ElevenLabs audio, Luna stays the brain."
+version = "0.5.0"
+description = "Full-duplex voice conversations that know who is speaking — OpenAI Realtime speech-to-speech in this agent's own persona, owner voice imprint, in-call knowledge tools, Luna stays the hands for real work."
 entry = "plugin_voice"
 sdk_version = "0"
 license = "MIT"
-tags = ["voice", "talk", "elevenlabs", "interface"]
+tags = ["voice", "talk", "realtime", "openai", "interface"]
 readme = """
 # plugin-voice
 
-Talk with your agent by voice — and it knows who's talking. plugin-voice adds a
-sidebar voice widget (live waveforms for you and the agent), with audio carried
-by ElevenLabs Agents while **your agent's own loop stays the brain** through an
-OpenAI-compatible bridge this plugin serves.
+Talk with your agent by voice — full duplex, interruptible, and it knows who's
+talking. plugin-voice adds a sidebar voice widget (live waveforms for you and
+the agent) powered by OpenAI Realtime speech-to-speech, working in three lanes:
 
-Beyond plugin-talk, this plugin adds:
-- **Owner voice imprint**: record a few phrases in Settings; the plugin builds a
-  voice profile and flags whether the current speaker is you.
-- **Personality-matched setup**: on connect, the agent itself chooses its
-  greeting (with its real name), its "thinking" filler phrases, and the
-  ElevenLabs voice that best fits its personality.
+- **Talking**: the realtime model speaks AS your agent — its real name,
+  greeting, attitude, and filler style, replicated from the agent's own
+  personality at connect time.
+- **Knowledge**: read-only info tools (memory, wiki, files, ...) are exposed
+  directly to the talker, so quick questions get answered mid-sentence.
+- **Doing**: real work is delegated to your actual agent in the background —
+  the talker narrates, keeps the conversation going, and relays a short spoken
+  summary when the task finishes. Details land in your chat.
 
-Requires plugin-vault. Audio flows browser ⇄ ElevenLabs; the imprint check runs
-on lightweight spectral features on your Luna, never leaving it.
+Beyond plugin-talk, this plugin adds an **owner voice imprint**: record a few
+phrases in Settings; the plugin builds a voice profile and flags whether the
+current speaker is you — unrecognized voices get read-only politeness.
+
+Requires plugin-vault and an OpenAI API key (pasted, granted, gateway, or
+env). Audio flows browser ⇄ OpenAI over WebRTC; the imprint check runs on
+lightweight spectral features on your Luna, never leaving it.
 
 Source: https://github.com/huemorgan/plugin-voice
 """
@@ -33,12 +39,12 @@ depends_on = ["plugin-vault"]
 
 [[tools]]
 name = "voice_status"
-description = "Status of the voice setup: key availability (own/vault/gateway/env), agent provisioned, imprint ready."
+description = "Status of the voice setup: OpenAI key availability (own/vault/gateway/env), realtime voice and model, imprint ready."
 policy = "auto_approve"
 risk_level = "low"
 
 [[tools]]
 name = "voice_connect"
-description = "Complete the voice setup with whatever ElevenLabs/11labs key is available; provisions the personality-matched voice agent."
+description = "Complete the voice setup with whatever OpenAI key is available; validates it against the Realtime API and sets up the personality-matched talker."
 policy = "ask"
 risk_level = "medium"

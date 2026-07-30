@@ -3,8 +3,8 @@
 At connect time we ask the agent (via the sanctioned ``run_turn`` surface) who
 it is: its name, a greeting in its own voice, waiting fillers that sound like
 IT (a Terminator waits differently than a butler), and a description of the
-voice that would fit. A second call picks the best ElevenLabs voice from the
-account's list. Every step degrades gracefully to neutral defaults — connect
+voice that would fit. A second call picks the best-fitting voice from the
+realtime catalog. Every step degrades gracefully to neutral defaults — connect
 must never fail because personality fetch failed.
 """
 
@@ -78,7 +78,7 @@ def _clean_persona(raw: Any) -> dict | None:
     voice_desc = str(raw.get("voice_description") or "").strip()[:300]
     if not name or not greeting:
         return None
-    # TTS-safe fillers: ellipsis + trailing space (ElevenLabs buffer-words shape)
+    # TTS-safe fillers: ellipsis + trailing space (reads as a natural pause)
     fillers = [f.rstrip(".… ") + "... " for f in fillers if f]
     return {
         "name": name,
@@ -123,7 +123,7 @@ VOICE_PICK_SCHEMA: dict[str, Any] = {
 
 
 async def pick_voice(ctx: Any, voices: list[dict], voice_description: str | None, *, timeout: float = 20.0) -> str | None:
-    """Let the brain choose the ElevenLabs voice that fits its personality."""
+    """Let the brain choose the realtime voice that fits its personality."""
     import asyncio
     import json
 

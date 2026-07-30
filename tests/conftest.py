@@ -148,6 +148,10 @@ class _RegisteredTool:
     name: str
     policy: str = "auto_approve"
     risk_level: str = "low"
+    description: str = ""
+    parameters: dict | None = None
+    skill_gated: bool = False
+    handler: Any = None
 
 
 class FakeToolRegistry:
@@ -162,6 +166,12 @@ class FakeToolRegistry:
 
     def all(self) -> list[_RegisteredTool]:
         return list(self.tools)
+
+    def get(self, name: str) -> _RegisteredTool:
+        for t in self.tools:
+            if t.name == name:
+                return t
+        raise KeyError(name)
 
 
 class FakeCtx:
@@ -182,14 +192,15 @@ def app(ctx, monkeypatch):
     """A real FastAPI app with plugin-voice's routes mounted — the dojo surface."""
     from fastapi import FastAPI
 
-    from plugin_voice import routes as routes_module
-    from plugin_voice.state import set_client
+    from plugin_voice.state import reset_task_manager
 
-    set_client(None)  # isolate module-level client between tests
+    from plugin_voice import routes as routes_module
+
+    reset_task_manager()
     application = FastAPI()
     routes_module.register_routes(application, ctx)
     yield application
-    set_client(None)
+    reset_task_manager()
 
 
 @pytest.fixture()
@@ -200,92 +211,43 @@ def client(app):
         yield c
 
 
-class FakeEL:
-    """Stands in for ElevenLabsClient in routes — no network."""
+class FakeRT:
+    """Stands in for openai_realtime.RealtimeClient — no network.
 
-    from plugin_voice.elevenlabs import ElevenLabsClient as _real
-    AGENT_CONFIG_V = _real.AGENT_CONFIG_V  # code under test reads this off the class
+    Both setup (key probe) and routes (/rt/session mint) construct the client
+    via the `openai_realtime` module attribute, so one patch covers both.
+    """
 
-    instances: list["FakeEL"] = []
-    fail_key_check = False
-    existing_agents: dict[str, str] = {}  # name -> agent_id
-    agent_configs: list[dict] = []        # recorded create/update calls
-    bridge_urls: dict[str, str] = {}      # agent_id -> configured custom-llm url
-    bridge_headers: dict[str, dict] = {}  # agent_id -> configured request headers
-    voice_sets: list[tuple] = []          # recorded set_agent_voice calls
+    instances: list["FakeRT"] = []
+    fail_mint = False           # raise RealtimeError from mint_client_secret
+    minted: list[dict] = []     # recorded session configs
 
     def __init__(self, api_key: str | None = None, **kw):
         self.api_key = api_key
         self.kwargs = kw
         self.closed = False
-        FakeEL.instances.append(self)
+        FakeRT.instances.append(self)
 
-    async def list_voices(self):
-        if FakeEL.fail_key_check:
-            from plugin_voice.elevenlabs import ElevenLabsError
+    async def mint_client_secret(self, session: dict):
+        if FakeRT.fail_mint:
+            from plugin_voice.openai_realtime import RealtimeError
 
-            raise ElevenLabsError("HTTP 401")
-        return [
-            {"voice_id": "v-rachel", "name": "Rachel", "category": "premade", "preview_url": "https://x/r.mp3"},
-            {"voice_id": "v-luna", "name": "Luna", "category": "cloned", "preview_url": None},
-        ]
-
-    async def find_agent(self, name: str):
-        return FakeEL.existing_agents.get(name)
-
-    async def create_agent(self, name: str, *, custom_llm_url: str, bridge_secret: str, **persona):
-        agent_id = f"agent_auto_{len(FakeEL.existing_agents) + 1}"
-        FakeEL.existing_agents[name] = agent_id
-        FakeEL.agent_configs.append(
-            {"op": "create", "agent_id": agent_id, "url": custom_llm_url,
-             "secret": bridge_secret, "name": name, **persona}
-        )
-        return agent_id
-
-    async def update_agent_bridge(self, agent_id: str, *, custom_llm_url: str, bridge_secret: str, **persona):
-        FakeEL.agent_configs.append(
-            {"op": "update", "agent_id": agent_id, "url": custom_llm_url,
-             "secret": bridge_secret, **persona}
-        )
-        FakeEL.bridge_urls[agent_id] = custom_llm_url
-        FakeEL.bridge_headers[agent_id] = persona.get("request_headers") or {}
-
-    async def get_agent_bridge(self, agent_id: str):
-        url = FakeEL.bridge_urls.get(agent_id)
-        if not url:
-            return None
-        return {"url": url, "request_headers": FakeEL.bridge_headers.get(agent_id, {})}
-
-    async def get_agent_bridge_url(self, agent_id: str):
-        return FakeEL.bridge_urls.get(agent_id)
-
-    async def set_agent_voice(self, agent_id: str, voice_id):
-        FakeEL.voice_sets.append((agent_id, voice_id))
-
-    async def conversation_token(self, agent_id: str):
-        return f"tok-{agent_id}"
-
-    async def signed_url(self, agent_id: str):
-        return None
+            raise RealtimeError("OpenAI rejected the key (HTTP 401) — check it in Settings → Voice")
+        FakeRT.minted.append(session)
+        return {"value": "ek_test_secret", "expires_at": 4102444800, "session": session}
 
     async def close(self):
         self.closed = True
 
 
 @pytest.fixture(autouse=True)
-def _patch_elevenlabs(monkeypatch):
-    from plugin_voice import routes as routes_module
-    from plugin_voice import setup as setup_module
+def _patch_realtime(monkeypatch):
+    from plugin_voice import openai_realtime as rt_module
 
-    FakeEL.instances = []
-    FakeEL.fail_key_check = False
-    FakeEL.existing_agents = {}
-    FakeEL.agent_configs = []
-    FakeEL.bridge_urls = {}
-    FakeEL.bridge_headers = {}
-    FakeEL.voice_sets = []
-    monkeypatch.setattr(routes_module, "ElevenLabsClient", FakeEL)
-    monkeypatch.setattr(setup_module, "ElevenLabsClient", FakeEL)
-    # Deterministic off-Fly baseline; hosted-bridge tests set these explicitly.
-    monkeypatch.delenv("FLY_APP_NAME", raising=False)
-    monkeypatch.delenv("FLY_MACHINE_ID", raising=False)
+    FakeRT.instances = []
+    FakeRT.fail_mint = False
+    FakeRT.minted = []
+    monkeypatch.setattr(rt_module, "RealtimeClient", FakeRT)
+    # a developer's real key must never leak into the resolve chain under test
+    monkeypatch.delenv("LUNA_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)

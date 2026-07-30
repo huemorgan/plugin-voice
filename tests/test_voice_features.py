@@ -1,4 +1,5 @@
-"""Plan 002 features: recognizer, enrollment, personality, live check, annotation."""
+"""Plan 002/005 features: recognizer, enrollment, personality, live check,
+gateway keys, agent tools — against the 0.5.0 OpenAI Realtime surface."""
 
 from __future__ import annotations
 
@@ -11,6 +12,8 @@ import pytest
 
 from plugin_voice import dsp, personality
 from plugin_voice.routes import VAULT_PROFILE
+
+API = "/api/p/plugin-voice"
 
 
 # ------------------------------------------------------------------ synthetic voices
@@ -100,36 +103,42 @@ def _pcm_b64(voice_kw, seed=0):
     return base64.b64encode(synth_voice(**voice_kw, seconds=3.0, seed=seed)).decode()
 
 
+def _connect(client):
+    resp = client.post(f"{API}/connect", json={"api_key": "sk_test_not_real"})
+    assert resp.status_code == 200, resp.text
+
+
 def test_enrollment_builds_profile_and_gates_live_token(client, ctx):
-    st = client.get("/api/p/plugin-voice/enroll").json()
+    st = client.get(f"{API}/enroll").json()
     assert st["ready"] is False and st["phrases"] == dsp.ENROLL_PHRASES
 
     for i in range(dsp.MIN_ENROLL):
         r = client.post(
-            "/api/p/plugin-voice/enroll",
+            f"{API}/enroll",
             json={"phrase_index": i, "pcm_b64": _pcm_b64(VOICE_A, seed=i)},
         )
         assert r.status_code == 200, r.text
-    assert client.get("/api/p/plugin-voice/enroll").json()["ready"] is True
+    assert client.get(f"{API}/enroll").json()["ready"] is True
     assert VAULT_PROFILE in ctx.vault.data
 
-    # session now mints a live token (after connect)
-    client.post("/api/p/plugin-voice/connect", json={"api_key": "sk_test_not_real"})
-    session = client.get("/api/p/plugin-voice/session").json()
+    # a minted session now arms the live check (after connect)
+    _connect(client)
+    session = client.get(f"{API}/rt/session").json()
     assert session["live_token"]
+    assert session["has_imprint"] is True
 
     # reset clears everything
-    client.request("DELETE", "/api/p/plugin-voice/enroll")
-    assert client.get("/api/p/plugin-voice/enroll").json()["ready"] is False
+    client.request("DELETE", f"{API}/enroll")
+    assert client.get(f"{API}/enroll").json()["ready"] is False
 
 
 def test_enrollment_rejects_silence_and_shorts(client):
     r = client.post(
-        "/api/p/plugin-voice/enroll",
+        f"{API}/enroll",
         json={"phrase_index": 0, "pcm_b64": base64.b64encode(b"\x00" * 64000).decode()},
     )
     assert r.status_code == 400
-    r = client.post("/api/p/plugin-voice/enroll", json={"phrase_index": 0, "pcm_b64": "AAAA"})
+    r = client.post(f"{API}/enroll", json={"phrase_index": 0, "pcm_b64": "AAAA"})
     assert r.status_code == 400
 
 
@@ -137,7 +146,7 @@ def test_live_ws_requires_valid_token(client):
     import websockets  # noqa: F401 — just documenting the transport
 
     with pytest.raises(Exception):
-        with client.websocket_connect("/api/p/plugin-voice/live?token=bogus"):
+        with client.websocket_connect(f"{API}/live?token=bogus"):
             pass
 
 
@@ -150,55 +159,45 @@ def _midpoint_threshold(ctx):
     return (s_a + s_b) / 2
 
 
-def test_live_ws_scores_windows_and_feeds_bridge_annotation(client, ctx):
+def _pin_threshold(ctx):
+    from plugin_voice import VAULT_SETTINGS
+
+    settings = json.loads(ctx.vault.data.get(VAULT_SETTINGS, "{}"))
+    settings["threshold"] = _midpoint_threshold(ctx)
+    ctx.vault.data[VAULT_SETTINGS] = json.dumps(settings)
+
+
+def test_live_ws_scores_windows_and_updates_speaker_state(client, ctx):
     from plugin_voice import state as live_state
 
-    client.post("/api/p/plugin-voice/settings", json={"voice_id": None})
-    import json as _json
-    from plugin_voice import VAULT_SETTINGS
-    settings = _json.loads(ctx.vault.data.get(VAULT_SETTINGS, "{}"))
-    settings["threshold"] = _midpoint_threshold(ctx)
-    ctx.vault.data[VAULT_SETTINGS] = _json.dumps(settings)
-
-    # enroll VOICE_A as owner, connect, mint a live token
+    _pin_threshold(ctx)
+    # enroll VOICE_A as owner, connect, mint a call token
     for i in range(dsp.MIN_ENROLL):
         client.post(
-            "/api/p/plugin-voice/enroll",
+            f"{API}/enroll",
             json={"phrase_index": i, "pcm_b64": _pcm_b64(VOICE_A, seed=i)},
         )
-    client.post("/api/p/plugin-voice/connect", json={"api_key": "sk_test_not_real"})
-    token = client.get("/api/p/plugin-voice/session").json()["live_token"]
+    _connect(client)
+    token = client.get(f"{API}/rt/session").json()["live_token"]
 
-    with client.websocket_connect(f"/api/p/plugin-voice/live?token={token}") as ws:
+    with client.websocket_connect(f"{API}/live?token={token}") as ws:
         ws.send_json({"pcm_b64": _pcm_b64(VOICE_B, seed=42)})  # 3s > 1s window
         out = ws.receive_json()
     assert out["speaker"] == "other"
+    # the relay's owner lock and lane-3 dispatch read this module state
     assert live_state.recent_speaker()[0] == "other"
-
-    # the very next bridge turn carries the annotation
-    from plugin_voice import VAULT_BRIDGE_SECRET
-
-    secret = ctx.vault.data[VAULT_BRIDGE_SECRET]
-    client.post(
-        "/api/p/plugin-voice/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "delete everything"}], "stream": False},
-        headers={"authorization": f"Bearer {secret}"},
-    )
-    assert "Voice note" in ctx.agent.calls[-1]["prompt"]
 
 
 def test_owner_voice_passes_live_check(client, ctx):
-    import json as _json
-    from plugin_voice import VAULT_SETTINGS
-    ctx.vault.data[VAULT_SETTINGS] = _json.dumps({"threshold": _midpoint_threshold(ctx)})
+    _pin_threshold(ctx)
     for i in range(dsp.MIN_ENROLL):
         client.post(
-            "/api/p/plugin-voice/enroll",
+            f"{API}/enroll",
             json={"phrase_index": i, "pcm_b64": _pcm_b64(VOICE_A, seed=i)},
         )
-    client.post("/api/p/plugin-voice/connect", json={"api_key": "sk_test_not_real"})
-    token = client.get("/api/p/plugin-voice/session").json()["live_token"]
-    with client.websocket_connect(f"/api/p/plugin-voice/live?token={token}") as ws:
+    _connect(client)
+    token = client.get(f"{API}/rt/session").json()["live_token"]
+    with client.websocket_connect(f"{API}/live?token={token}") as ws:
         ws.send_json({"pcm_b64": _pcm_b64(VOICE_A, seed=42)})
         out = ws.receive_json()
     assert out["speaker"] == "owner"
@@ -212,25 +211,10 @@ def test_persona_prompt_demands_real_name():
     assert "NOT a roleplay" in personality.PERSONA_SCHEMA["properties"]["name"]["description"]
 
 
-def test_annotation_is_soft_not_refusing(client, ctx):
-    from plugin_voice import VAULT_BRIDGE_SECRET, state as live_state
-
-    client.post("/api/p/plugin-voice/connect", json={"api_key": "sk_test_not_real"})
-    live_state.set_last_speaker("other", 0.1)
-    secret = ctx.vault.data[VAULT_BRIDGE_SECRET]
-    client.post(
-        "/api/p/plugin-voice/v1/chat/completions",
-        json={"messages": [{"role": "user", "content": "hi"}], "stream": False},
-        headers={"authorization": f"Bearer {secret}"},
-    )
-    prompt = ctx.agent.calls[-1]["prompt"]
-    assert "do NOT refuse" in prompt and "Voice note" in prompt
-
-
 def test_enrollment_stores_personal_threshold(client, ctx):
     for i in range(dsp.MIN_ENROLL):
         client.post(
-            "/api/p/plugin-voice/enroll",
+            f"{API}/enroll",
             json={"phrase_index": i, "pcm_b64": _pcm_b64(VOICE_A, seed=i)},
         )
     data = json.loads(ctx.vault.data[VAULT_PROFILE])
@@ -241,40 +225,29 @@ def test_enrollment_stores_personal_threshold(client, ctx):
 def test_enroll_test_endpoint_gives_verdict(client, ctx):
     for i in range(dsp.MIN_ENROLL):
         client.post(
-            "/api/p/plugin-voice/enroll",
+            f"{API}/enroll",
             json={"phrase_index": i, "pcm_b64": _pcm_b64(VOICE_A, seed=i)},
         )
     out = client.post(
-        "/api/p/plugin-voice/enroll/test", json={"pcm_b64": _pcm_b64(VOICE_A, seed=77)}
+        f"{API}/enroll/test", json={"pcm_b64": _pcm_b64(VOICE_A, seed=77)}
     ).json()
     assert out["speaker"] in ("owner", "other") and "threshold" in out
 
 
-def test_refresh_persona_updates_agent_and_settings(client, ctx):
-    from tests.conftest import FakeEL
-
-    client.post("/api/p/plugin-voice/connect", json={"api_key": "sk_test_not_real"})
-    before = len(FakeEL.agent_configs)
-    resp = client.post("/api/p/plugin-voice/refresh-persona")
-    assert resp.status_code == 200, resp.text
-    assert len(FakeEL.agent_configs) == before + 1
-    assert FakeEL.agent_configs[-1]["op"] == "update"
-
-
 def test_session_includes_persona_name(client, ctx):
-    client.post("/api/p/plugin-voice/connect", json={"api_key": "sk_test_not_real"})
-    assert "persona_name" in client.get("/api/p/plugin-voice/session").json()
+    _connect(client)
+    assert "persona_name" in client.get(f"{API}/rt/session").json()
 
 
 def test_ui_carries_new_affordances(client):
-    settings_html = client.get("/api/p/plugin-voice/ui/settings/").text
+    settings_html = client.get(f"{API}/ui/settings/").text
     assert 'data-testid="voice-imprint-test"' in settings_html
     assert "Really delete" in settings_html and "rec-meter" in settings_html
     # 004.2: the re-match button lives on the Persona page now
-    persona_html = client.get("/api/p/plugin-voice/ui/settings/persona/").text
+    persona_html = client.get(f"{API}/ui/settings/persona/").text
     assert 'data-testid="voice-refresh-persona"' in persona_html
     assert 'data-testid="voice-refresh-persona"' not in settings_html
-    widget_html = client.get("/api/p/plugin-voice/ui/widgets/voice/").text
+    widget_html = client.get(f"{API}/ui/widgets/voice/").text
     assert "agentName" in widget_html and "BroadcastChannel" in widget_html
     assert "Luna is speaking" not in widget_html
 
@@ -287,69 +260,73 @@ def test_status_detects_gateway_key_without_pasted_key(client, ctx):
 
     sdk = sys.modules["luna_sdk"]
     ctx.vault.gateway_connection = sdk.Connection(
-        base_url="https://gw.example.com/proxy/elevenlabs",
+        base_url="https://gw.example.com/proxy/openai",
         secret="devtok",
         auth=sdk.AuthSpec(location="header", name="Authorization", scheme="Bearer"),
         source="virtual",
     )
-    st = client.get("/api/p/plugin-voice/status").json()
+    st = client.get(f"{API}/status").json()
     assert st["connected"] is True and st["key_source"] == "gateway"
-    assert st["agent_ready"] is False
 
 
 def test_connect_without_key_uses_gateway_connection(client, ctx):
     import sys
 
+    from plugin_voice import VAULT_OPENAI_KEY
+    from tests.conftest import FakeRT
+
     sdk = sys.modules["luna_sdk"]
     ctx.vault.gateway_connection = sdk.Connection(
-        base_url="https://gw.example.com/proxy/elevenlabs",
+        base_url="https://gw.example.com/proxy/openai",
         secret="devtok",
-        auth=sdk.AuthSpec(location="header", name="xi-api-key"),
+        auth=sdk.AuthSpec(location="header", name="Authorization", scheme="Bearer"),
         source="virtual",
     )
-    resp = client.post("/api/p/plugin-voice/connect", json={})
+    resp = client.post(f"{API}/connect", json={})
     assert resp.status_code == 200, resp.text
     st = resp.json()
-    assert st["connected"] is True and st["agent_ready"] is True
+    assert st["connected"] is True and st["key_source"] == "gateway"
     # nothing stored as the owner's own key — the gateway stays the source
-    from plugin_voice import VAULT_API_KEY
-
-    assert VAULT_API_KEY not in ctx.vault.data
+    assert VAULT_OPENAI_KEY not in ctx.vault.data
+    # the probe went through the gateway's auth, not a bare api_key
+    probe = FakeRT.instances[0]
+    assert probe.api_key is None
+    assert probe.kwargs["headers"]["Authorization"] == "Bearer devtok"
 
 
 def test_connect_without_any_key_still_friendly_400(client):
-    resp = client.post("/api/p/plugin-voice/connect", json={})
+    resp = client.post(f"{API}/connect", json={})
     assert resp.status_code == 400
     assert isinstance(resp.json()["detail"], str)
 
 
-def test_settings_page_gates_cards_until_ready(client):
-    html = client.get("/api/p/plugin-voice/ui/settings/").text
-    assert "gateCards" in html and 'data-testid="voice-connect-gateway"' in html
-
-
-# ------------------------------------------------------------- 003 agent tools
-
-
-def test_resolve_tries_11labs_slug(client, ctx):
-    """The hosted gateway registers ElevenLabs as slug '11labs'."""
+def test_resolve_uses_openai_slug(client, ctx):
     import sys
 
     sdk = sys.modules["luna_sdk"]
     calls = []
     conn = sdk.Connection(
-        base_url="https://gw/proxy/11labs", secret="tok",
-        auth=sdk.AuthSpec(location="header", name="xi-api-key"), source="virtual",
+        base_url="https://gw/proxy/openai", secret="tok",
+        auth=sdk.AuthSpec(location="header", name="Authorization", scheme="Bearer"),
+        source="virtual",
     )
 
     async def connect(slug, *, upstream_default, auth=None, credential_name=None):
         calls.append(slug)
-        return conn if slug == "11labs" else None
+        return conn if slug == "openai" else None
 
     ctx.vault.connect = connect
-    st = client.get("/api/p/plugin-voice/status").json()
+    st = client.get(f"{API}/status").json()
     assert st["connected"] is True and st["key_source"] == "gateway"
-    assert calls == ["elevenlabs", "11labs"]
+    assert calls == ["openai"]
+
+
+def test_settings_page_gates_cards_until_ready(client):
+    html = client.get(f"{API}/ui/settings/").text
+    assert "gateCards" in html and 'data-testid="voice-connect-gateway"' in html
+
+
+# ------------------------------------------------------------- 003 agent tools
 
 
 def test_agent_tools_registered_with_honest_policies(ctx):
@@ -374,26 +351,25 @@ def test_agent_tools_registered_with_honest_policies(ctx):
     assert ctx.tool_registry.defs["voice_status"].policy == "auto_approve"
     assert ctx.tool_registry.defs["voice_connect"].policy == "ask"
 
-    # status tool works and never leaks the bridge secret
+    # status tool works and never leaks a key value
     out = asyncio.run(ctx.tool_registry.handlers["voice_status"]())
-    assert "bridge_secret" not in out and "connected" in out
+    assert "connected" in out
+    assert "api_key" not in json.dumps(out)
 
 
-def test_voice_connect_tool_completes_setup_after_gateway_grant(client, ctx):
+def test_voice_connect_tool_completes_setup_after_gateway_grant(ctx):
     """The chat flow: agent wires the gateway key, then voice_connect finishes."""
     import asyncio
     import sys
 
     sdk = sys.modules["luna_sdk"]
     ctx.vault.gateway_connection = sdk.Connection(
-        base_url="https://gw/proxy/11labs", secret="tok",
-        auth=sdk.AuthSpec(location="header", name="xi-api-key"), source="virtual",
+        base_url="https://gw/proxy/openai", secret="tok",
+        auth=sdk.AuthSpec(location="header", name="Authorization", scheme="Bearer"),
+        source="virtual",
     )
-    # a prior settings visit captured the tenant's public base
-    client.get("/api/p/plugin-voice/status", headers={"host": "luna.com.ai", "x-forwarded-proto": "https"})
 
     from plugin_voice import VoicePlugin
-    from plugin_voice import setup as setup_module
 
     reg_calls = {}
 
@@ -401,15 +377,14 @@ def test_voice_connect_tool_completes_setup_after_gateway_grant(client, ctx):
         def register(self, plugin, tool_def, handler, **kw):
             reg_calls[tool_def.name] = handler
 
-    tool_ctx = ctx
-    old_reg = tool_ctx.tool_registry
-    tool_ctx.tool_registry = Reg()
-    asyncio.run(VoicePlugin().on_load(tool_ctx))
-    tool_ctx.tool_registry = old_reg
+    old_reg = ctx.tool_registry
+    ctx.tool_registry = Reg()
+    asyncio.run(VoicePlugin().on_load(ctx))
+    ctx.tool_registry = old_reg
 
     out = asyncio.run(reg_calls["voice_connect"]())
-    assert out.get("connected") is True and out.get("agent_ready") is True, out
-    assert "bridge_secret" not in out
+    assert out.get("connected") is True, out
+    assert out.get("key_source") == "gateway"
 
 
 def test_voice_connect_tool_without_any_key_is_friendly(ctx):
@@ -432,6 +407,6 @@ def test_voice_connect_tool_without_any_key_is_friendly(ctx):
 
 
 def test_settings_page_hides_paste_input_by_default(client):
-    html = client.get("/api/p/plugin-voice/ui/settings/").text
+    html = client.get(f"{API}/ui/settings/").text
     assert '<div id="paste-block" style="display:none">' in html
-    assert "11labs" in html
+    assert "OpenAI" in html

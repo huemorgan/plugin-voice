@@ -1,4 +1,4 @@
-"""Module-level live state — ElevenLabs client, live-check tokens, last speaker.
+"""Module-level live state — call tokens, last speaker, lane-3 task manager.
 
 Same pattern as plugin-render's `state.py`: resolved at call time, never cached
 on the plugin instance.
@@ -7,42 +7,25 @@ on the plugin instance.
 from __future__ import annotations
 
 import time
-from typing import Any
 
-_client: Any = None
-
-# live-check WS tokens: token -> expiry ts. Minted by /session (owner-authed);
-# the widget iframe has no bearer token, so the WS authenticates with these.
+# live-check WS tokens: token -> expiry ts. The widget iframe has no bearer
+# token, so /live and the rt relay authenticate with these.
 _live_tokens: dict[str, float] = {}
 LIVE_TOKEN_TTL = 300.0
+
+# 005: rt tokens gate the realtime relay endpoints (/rt/tool, /rt/events) for
+# a whole call — calls outlast the 5-minute live-token TTL by design.
+RT_TOKEN_TTL = 4 * 3600.0
 
 # most recent speaker verdict from the live check: (label, score, ts)
 _last_speaker: tuple[str, float, float] | None = None
 
 
-def get_client() -> Any:
-    return _client
-
-
-def set_client(client: Any) -> None:
-    global _client
-    _client = client
-
-
-async def close_client() -> None:
-    global _client
-    if _client is not None:
-        try:
-            await _client.close()
-        finally:
-            _client = None
-
-
-def mint_live_token(token: str) -> None:
+def mint_live_token(token: str, *, ttl: float = LIVE_TOKEN_TTL) -> None:
     now = time.time()
     for t in [t for t, exp in _live_tokens.items() if exp < now]:
         _live_tokens.pop(t, None)
-    _live_tokens[token] = now + LIVE_TOKEN_TTL
+    _live_tokens[token] = now + ttl
 
 
 def live_token_valid(token: str) -> bool:
@@ -69,31 +52,20 @@ def reset_speaker() -> None:
     _last_speaker = None
 
 
-# 004: one background persona resync at a time — /session fires it when the
-# agent's live name no longer matches what the greeting was generated for.
-# The task reference is kept so it can't be garbage-collected mid-flight
-# (asyncio only holds a weak ref to tasks) and so tests can await it.
-_resync_inflight = False
-_resync_task = None
+# 005: one TaskManager per process — lane-3 tasks and their event stream must
+# survive across route calls and widget reconnects.
+_task_manager = None
 
 
-def try_begin_resync() -> bool:
-    global _resync_inflight
-    if _resync_inflight:
-        return False
-    _resync_inflight = True
-    return True
+def task_manager():
+    global _task_manager
+    if _task_manager is None:
+        from .tasks import TaskManager
+
+        _task_manager = TaskManager()
+    return _task_manager
 
 
-def end_resync() -> None:
-    global _resync_inflight
-    _resync_inflight = False
-
-
-def set_resync_task(task) -> None:
-    global _resync_task
-    _resync_task = task
-
-
-def resync_task():
-    return _resync_task
+def reset_task_manager() -> None:
+    global _task_manager
+    _task_manager = None

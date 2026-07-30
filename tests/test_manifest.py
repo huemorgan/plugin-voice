@@ -22,7 +22,7 @@ def _manifest():
 def test_toml_and_manifest_agree():
     toml, manifest = _toml(), _manifest()
     assert toml["name"] == manifest.name == "plugin-voice"
-    assert toml["version"] == manifest.version == "0.4.2"
+    assert toml["version"] == manifest.version == "0.5.0"
     assert toml["entry"] == "plugin_voice"
     assert toml["description"] == manifest.description
 
@@ -66,7 +66,8 @@ def test_widget_files_shipped():
     """The widget's static files exist inside the package (survive packaging)."""
     widget_dir = PKG / "ui" / "widgets" / "voice"
     assert (widget_dir / "index.html").is_file()
-    assert (widget_dir / "elevenlabs-client.js").is_file()
+    assert (widget_dir / "rt-client.js").is_file()
+    assert not (widget_dir / "elevenlabs-client.js").exists()
     assert (PKG / "ui" / "settings" / "index.html").is_file()
     assert (PKG / "ui" / "settings" / "persona" / "index.html").is_file()
 

@@ -35,7 +35,7 @@
   textarea { resize: vertical; min-height: 74px; line-height: 1.5; }
   textarea.tall { min-height: 130px; }
   input:focus, select:focus, textarea:focus { border-color: var(--accent-dim); }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   button {
     margin-top: 12px; border: 0; border-radius: 9px;
     background: var(--accent); color: #14121f; font-weight: 650;
@@ -57,10 +57,6 @@
   summary:hover { color: var(--fg); }
   #save-msg, #voice-msg, #persona-msg { font-size: 12.5px; margin-top: 10px; min-height: 16px; }
   .status-ok { color: var(--ok); } .status-err { color: var(--err); }
-  .toggle { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
-  .toggle input { width: auto; }
-  .toggle span { font-size: 13px; }
-  audio { width: 100%; margin-top: 10px; height: 32px; }
 
   /* 004.1: one settings tab in the shell; Setup/Persona switch lives here */
   nav.tabs { display: flex; gap: 4px; margin-bottom: 18px;
@@ -82,14 +78,13 @@
 </script>
 <h2>Voice Persona</h2>
 <p class="hint" id="who-line">How your agent sounds on a call — its voice, greeting, waiting
-words and the prompts that shape voice replies. Anything you leave on “auto” follows the
+words and the instructions that shape the talker. Anything you leave on “auto” follows the
 agent's own personality and updates when it changes.</p>
 
 <div class="card">
   <strong>Voice</strong>
-  <label>Text-to-speech voice</label>
-  <select id="voice" data-testid="persona-voice-select"><option value="">Agent default</option></select>
-  <audio id="preview" controls style="display:none"></audio>
+  <label>Realtime voice</label>
+  <select id="voice" data-testid="persona-voice-select"><option value="">Auto (persona-matched)</option></select>
   <button id="save-voice" data-testid="persona-save-voice">Save voice</button>
   <div id="voice-msg"></div>
 </div>
@@ -115,42 +110,23 @@ agent's own personality and updates when it changes.</p>
 </div>
 
 <div class="card">
-  <strong>Timing</strong>
-  <div class="grid2">
-    <div>
-      <label>Silence before a filler (s)</label>
-      <input id="soft_timeout_seconds" data-testid="persona-soft-timeout" type="number" min="1" max="30" step="0.5" />
-    </div>
-    <div>
-      <label>Max fillers per reply</label>
-      <input id="max_soft_timeouts" data-testid="persona-max-timeouts" type="number" min="0" max="10" step="1" />
-    </div>
-    <div>
-      <label>Turn taking</label>
-      <select id="turn_eagerness" data-testid="persona-eagerness"></select>
-    </div>
-  </div>
+  <strong>Turn taking</strong>
+  <p class="hint">How eagerly the voice jumps in when you pause — “patient” waits for you
+  to finish, “eager” answers fast.</p>
+  <select id="turn_eagerness" data-testid="persona-eagerness"></select>
 </div>
 
 <div class="card">
   <strong>Prompts</strong>
-  <p class="hint">The exact instructions behind voice replies. Edit freely — “Reset all”
-  below restores the shipped text.</p>
+  <p class="hint">The instructions behind the talker. Edit freely — “Reset all”
+  below restores the shipped behavior.</p>
   <details open>
-    <summary>Voice style prompt (every reply)</summary>
-    <textarea id="voice_system_prompt" data-testid="persona-voice-prompt" class="tall"></textarea>
+    <summary>Speaking style (replaces the built-in style rules)</summary>
+    <textarea id="voice_system_prompt" data-testid="persona-voice-prompt" class="tall" placeholder="auto — the shipped spoken-style rules"></textarea>
   </details>
   <details>
-    <summary>Open-mic triage (decides whether to answer at all)</summary>
-    <div class="toggle">
-      <input type="checkbox" id="triage_enabled" data-testid="persona-triage-enabled" />
-      <span>Gate room chatter with a fast pre-check (recommended for open mic)</span>
-    </div>
-    <textarea id="triage_system" data-testid="persona-triage-prompt" class="tall"></textarea>
-  </details>
-  <details>
-    <summary>ElevenLabs passthrough prompt (advanced)</summary>
-    <textarea id="passthrough_prompt" data-testid="persona-passthrough-prompt"></textarea>
+    <summary>Extra instructions (appended last — wins on conflict)</summary>
+    <textarea id="talker_extra" data-testid="persona-talker-extra" placeholder="e.g. Always answer in French."></textarea>
   </details>
 </div>
 
@@ -201,7 +177,7 @@ agent's own personality and updates when it changes.</p>
     var v = s.values || {};
     if (s.persona_name) {
       $("who-line").textContent = "How " + s.persona_name + " sounds on a call — voice, greeting, "
-        + "waiting words and the prompts behind voice replies. “Auto” fields follow its personality.";
+        + "waiting words and the instructions behind the talker. “Auto” fields follow its personality.";
     }
     // greeting / fillers: show the override if set, else placeholder=auto value
     $("greeting").value = ov.greeting || "";
@@ -218,8 +194,6 @@ agent's own personality and updates when it changes.</p>
       : (autoFill.length ? "Auto: " + autoFill.join(" · ") : "Auto (neutral phrases)");
     $("fillers-note").className = "field-note " + ((ov.fillers && ov.fillers.length) ? "override-note" : "auto-note");
 
-    $("soft_timeout_seconds").value = v.soft_timeout_seconds;
-    $("max_soft_timeouts").value = v.max_soft_timeouts;
     var sel = $("turn_eagerness");
     sel.innerHTML = "";
     (s.turn_eagerness_values || ["eager", "normal", "patient"]).forEach(function (opt) {
@@ -229,9 +203,7 @@ agent's own personality and updates when it changes.</p>
     });
     sel.value = v.turn_eagerness;
     $("voice_system_prompt").value = v.voice_system_prompt || "";
-    $("triage_enabled").checked = !!v.triage_enabled;
-    $("triage_system").value = v.triage_system || "";
-    $("passthrough_prompt").value = v.passthrough_prompt || "";
+    $("talker_extra").value = v.talker_extra || "";
   }
 
   function collectChanges() {
@@ -240,19 +212,13 @@ agent's own personality and updates when it changes.</p>
     body.greeting = $("greeting").value.trim() || null; // null → auto
     var lines = $("fillers").value.split("\n").map(function (l) { return l.trim(); }).filter(Boolean);
     body.fillers = lines.length ? lines.slice(0, 5) : null;
-    body.soft_timeout_seconds = parseFloat($("soft_timeout_seconds").value);
-    body.max_soft_timeouts = parseInt($("max_soft_timeouts").value, 10);
     body.turn_eagerness = $("turn_eagerness").value;
-    body.triage_enabled = $("triage_enabled").checked;
-    // prompts: identical-to-default (or blank) → null clears the override
-    ["voice_system_prompt", "triage_system", "passthrough_prompt"].forEach(function (f) {
+    // prompts: blank → null clears the override (back to shipped behavior)
+    ["voice_system_prompt", "talker_extra"].forEach(function (f) {
       var val = $(f).value.trim();
-      body[f] = (!val || val === d[f]) ? null : val;
+      body[f] = val || null;
     });
-    if (body.soft_timeout_seconds === d.soft_timeout_seconds) { body.soft_timeout_seconds = null; }
-    if (body.max_soft_timeouts === d.max_soft_timeouts) { body.max_soft_timeouts = null; }
     if (body.turn_eagerness === d.turn_eagerness) { body.turn_eagerness = null; }
-    if (body.triage_enabled === d.triage_enabled) { body.triage_enabled = null; }
     return body;
   }
 
@@ -260,16 +226,12 @@ agent's own personality and updates when it changes.</p>
     var b = $("save");
     try {
       b.disabled = true;
-      var out = await call("/persona-settings", {
+      await call("/persona-settings", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(collectChanges()),
       });
-      msg($("save-msg"),
-          out.applied_to_agent
-            ? "✓ Saved and applied — takes effect on the next call."
-            : "✓ Saved — voice-side changes apply once the agent is connected.",
-          true);
+      msg($("save-msg"), "✓ Saved — takes effect on the next call.", true);
       fillForm(await call("/persona-settings"));
     } catch (e) { msg($("save-msg"), e.message, false); }
     finally { b.disabled = false; }
@@ -302,30 +264,22 @@ agent's own personality and updates when it changes.</p>
     } catch (e) { msg($("save-msg"), e.message, false); }
   });
 
-  // ---- voice picker (same endpoints the Voice tab uses) ----
+  // ---- voice picker (same endpoints the Setup tab uses; static catalog) ----
   async function loadVoices(selected) {
     try {
       var data = await call("/voices");
       var sel = $("voice");
-      sel.innerHTML = '<option value="">Agent default</option>';
+      sel.innerHTML = '<option value="">Auto (persona-matched)</option>';
       data.voices.forEach(function (v) {
         var o = document.createElement("option");
         o.value = v.voice_id;
-        o.textContent = v.name + (v.category ? " (" + v.category + ")" : "");
-        o.dataset.preview = v.preview_url || "";
+        var desc = v.labels && v.labels.description ? " — " + v.labels.description : "";
+        o.textContent = v.name + desc;
         sel.appendChild(o);
       });
       if (selected) { sel.value = selected; }
     } catch (e) { /* not connected — picker stays empty */ }
   }
-
-  $("voice").addEventListener("change", function () {
-    var opt = this.selectedOptions[0];
-    var url = opt && opt.dataset.preview;
-    var audio = $("preview");
-    if (url) { audio.src = url; audio.style.display = "block"; audio.play().catch(function(){}); }
-    else { audio.pause(); audio.style.display = "none"; }
-  });
 
   $("refresh-persona").addEventListener("click", async function () {
     var b = $("refresh-persona");
@@ -334,7 +288,7 @@ agent's own personality and updates when it changes.</p>
       var st = await call("/refresh-persona", { method: "POST" });
       var s = await call("/persona-settings");
       fillForm(s);
-      await loadVoices(s.voice_id);
+      await loadVoices(s.rt_voice);
       msg($("persona-msg"), "✓ Updated — " + (st.persona_name || "agent") + " chose its greeting, waiting words and voice.", true);
     } catch (e) { msg($("persona-msg"), e.message, false); }
     finally { b.disabled = false; b.textContent = "Re-match voice & words to personality"; }
@@ -345,7 +299,7 @@ agent's own personality and updates when it changes.</p>
       await call("/settings", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ voice_id: $("voice").value || null }),
+        body: JSON.stringify({ rt_voice: $("voice").value || null }),
       });
       msg($("voice-msg"), "Saved — applies to the next call.", true);
     } catch (e) { msg($("voice-msg"), e.message, false); }
@@ -355,7 +309,7 @@ agent's own personality and updates when it changes.</p>
     try {
       var s = await call("/persona-settings");
       fillForm(s);
-      loadVoices(s.voice_id);
+      loadVoices(s.rt_voice);
     } catch (e) {
       msg($("save-msg"), "Could not load persona settings: " + e.message, false);
     }

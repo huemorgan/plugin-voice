@@ -1,10 +1,9 @@
-"""004 — live identity + the Voice Persona settings surface.
+"""004/005 — live identity + the Voice Persona settings surface.
 
 Covers: the override merge (owner > auto persona > shipped default), the
-GET/PUT routes (validation, ElevenLabs re-PATCH on voice-side changes), the
-prompt overrides reaching the bridge turn/triage, and the automatic persona
-resync when the agent's live identity name no longer matches the name the
-greeting was generated for.
+GET/PUT routes (validation, no upstream writes — everything applies at the
+next /rt/session mint), the prompt overrides reaching the talker
+instructions, and persona resync keeping owner overrides.
 """
 
 from __future__ import annotations
@@ -15,16 +14,15 @@ import anyio
 import pytest
 
 from plugin_voice import (
-    VAULT_AGENT_ID,
-    VAULT_API_KEY,
-    VAULT_BRIDGE_SECRET,
+    VAULT_OPENAI_KEY,
     VAULT_SETTINGS,
     persona_config,
     setup,
+    talker,
 )
 from plugin_voice.persona_config import PersonaConfigError
 
-from tests.conftest import FakeEL  # noqa: E402 — shared fake, autouse-patched
+from tests.conftest import FakeRT  # noqa: E402 — shared fake, autouse-patched
 
 API = "/api/p/plugin-voice"
 
@@ -33,14 +31,9 @@ API = "/api/p/plugin-voice"
 
 
 def test_effective_defaults_match_shipped_constants():
-    from plugin_voice import bridge
-
     eff = persona_config.effective({})
-    assert eff["voice_system_prompt"] == bridge.VOICE_SYSTEM_PROMPT
-    assert eff["triage_system"] == bridge.TRIAGE_SYSTEM
-    assert eff["triage_enabled"] is True
-    assert eff["soft_timeout_seconds"] == 5.0
-    assert eff["max_soft_timeouts"] == 3
+    assert eff["voice_system_prompt"] is None   # None → talker.VOICE_STYLE applies
+    assert eff["talker_extra"] is None
     assert eff["turn_eagerness"] == "patient"
     assert eff["greeting"] == persona_config.NEUTRAL_GREETING
     assert eff["fillers"] == persona_config.NEUTRAL_FILLERS
@@ -60,14 +53,12 @@ def test_effective_precedence_override_beats_auto_beats_default():
 def test_apply_changes_validates():
     for bad in (
         {"turn_eagerness": "hyper"},
-        {"soft_timeout_seconds": 99},
-        {"max_soft_timeouts": -1},
-        {"max_soft_timeouts": 2.5},
-        {"triage_enabled": "yes"},
         {"fillers": "not a list"},
         {"fillers": []},
         {"greeting": "   "},
+        {"greeting": "x" * 301},
         {"unknown_field": "x"},
+        {"soft_timeout_seconds": 8},  # dropped in 0.5.0 — now unknown
     ):
         with pytest.raises(PersonaConfigError):
             persona_config.apply_changes({}, bad)
@@ -80,28 +71,37 @@ def test_apply_changes_none_clears_override():
     assert "greeting" not in persona_config.overrides_of(settings)
 
 
+def test_stale_050_dropped_fields_in_stored_overrides_are_ignored():
+    """A 0.4.x install carries triage/timeout overrides; the merge must not
+    surface them, and current fields still resolve."""
+    settings = {
+        persona_config.OVERRIDES_KEY: {
+            "triage_enabled": False,
+            "soft_timeout_seconds": 8.0,
+            "greeting": "Still mine.",
+        }
+    }
+    eff = persona_config.effective(settings)
+    assert eff["greeting"] == "Still mine."
+    assert "triage_enabled" not in eff
+    assert "soft_timeout_seconds" not in eff
+
+
 # ------------------------------------------------------------------ the routes
 
 
-async def _prewire(ctx, *, overrides: dict | None = None):
-    """A connected, provisioned install with the current config stamp."""
-    from plugin_voice.elevenlabs import ElevenLabsClient
-
-    await ctx.vault.store_credential(VAULT_API_KEY, "sk_test_not_real", kind="api_key")
-    await ctx.vault.store_credential(VAULT_AGENT_ID, "agent_x", kind="config")
-    await ctx.vault.store_credential(VAULT_BRIDGE_SECRET, "s" * 32, kind="api_key")
+async def _prewire(ctx, overrides: dict | None = None):
+    """A connected install with a persona snapshot in settings."""
+    await ctx.vault.store_credential(VAULT_OPENAI_KEY, "sk_test_not_real", kind="api_key")
     settings = {
         "persona_name": "Nova",
         "greeting": "Hi, Nova here!",
         "fillers": ["On it... "],
-        "voice_id": "v-luna",
-        "agent_config_v": ElevenLabsClient.AGENT_CONFIG_V,
+        "rt_voice": "cedar",
     }
     if overrides:
         settings[persona_config.OVERRIDES_KEY] = overrides
     await ctx.vault.store_credential(VAULT_SETTINGS, json.dumps(settings), kind="config")
-    FakeEL.bridge_urls["agent_x"] = "https://example.com/api/p/plugin-voice/v1"
-    FakeEL.bridge_headers["agent_x"] = {}
 
 
 def test_get_persona_settings_shape(client, ctx):
@@ -112,42 +112,25 @@ def test_get_persona_settings_shape(client, ctx):
     assert data["overrides"] == {}
     assert data["defaults"]["turn_eagerness"] == "patient"
     assert data["persona_name"] == "Nova"
-    assert data["voice_id"] == "v-luna"
+    assert data["rt_voice"] == "cedar"
     assert set(data["turn_eagerness_values"]) == {"eager", "normal", "patient"}
 
 
-def test_put_persona_settings_saves_and_repatches_agent(client, ctx):
+def test_put_persona_settings_saves(client, ctx):
     anyio.run(_prewire, ctx)
     resp = client.put(
         f"{API}/persona-settings",
-        json={
-            "greeting": "Yo, it's me.",
-            "soft_timeout_seconds": 8,
-            "turn_eagerness": "normal",
-        },
+        json={"greeting": "Yo, it's me.", "turn_eagerness": "normal"},
     )
     assert resp.status_code == 200, resp.text
     out = resp.json()
-    assert out["saved"] and out["applied_to_agent"]
-    assert set(out["changed"]) == {"greeting", "soft_timeout_seconds", "turn_eagerness"}
-
-    patch = FakeEL.agent_configs[-1]
-    assert patch["op"] == "update" and patch["agent_id"] == "agent_x"
-    assert patch["first_message"] == "Yo, it's me."          # override beats auto
-    assert patch["fillers"] == ["On it... "]                  # auto kept
-    assert patch["overrides"]["soft_timeout_seconds"] == 8.0
-    assert patch["overrides"]["turn_eagerness"] == "normal"
+    assert out["saved"]
+    assert set(out["changed"]) == {"greeting", "turn_eagerness"}
+    assert out["values"]["greeting"] == "Yo, it's me."       # override beats auto
+    assert "applied_to_agent" not in out                     # no upstream to patch
 
     stored = json.loads(ctx.vault.data[VAULT_SETTINGS])
     assert stored[persona_config.OVERRIDES_KEY]["greeting"] == "Yo, it's me."
-
-
-def test_put_prompt_only_change_does_not_patch_agent(client, ctx):
-    anyio.run(_prewire, ctx)
-    resp = client.put(f"{API}/persona-settings", json={"voice_system_prompt": "Talk like a pirate."})
-    assert resp.status_code == 200
-    assert resp.json()["applied_to_agent"] is False
-    assert FakeEL.agent_configs == []  # bridge-side only — no ElevenLabs write
 
 
 def test_put_persona_settings_rejects_bad_values(client, ctx):
@@ -166,59 +149,45 @@ def test_persona_ui_page_served(client):
     assert "location.pathname.split" in html
 
 
-# ------------------------------------------------- overrides reach the bridge
+# ------------------------------------------- overrides reach the minted session
 
 
-def _wire_bridge(ctx, *, overrides: dict | None = None, run_llm=None):
-    ctx.vault.data[VAULT_BRIDGE_SECRET] = "s" * 32
-    settings: dict = {"greeting": "Hi!", "fillers": ["Working... "]}
-    if overrides:
-        settings[persona_config.OVERRIDES_KEY] = overrides
-    ctx.vault.data[VAULT_SETTINGS] = json.dumps(settings)
-    if run_llm is not None:
-        ctx.agent.run_llm = run_llm
+def _mint(client):
+    resp = client.get(f"{API}/rt/session")
+    assert resp.status_code == 200, resp.text
+    assert FakeRT.minted, "no session config was minted"
+    return FakeRT.minted[-1]
 
 
-def _chat(client, text="What time is it?"):
-    return client.post(
-        f"{API}/v1/chat/completions",
-        headers={"Authorization": "Bearer " + "s" * 32},
-        json={"messages": [{"role": "user", "content": text}], "stream": True},
-    )
+def test_custom_voice_prompt_reaches_talker_instructions(client, ctx):
+    anyio.run(_prewire, ctx, {"voice_system_prompt": "Talk like a pirate."})
+    session = _mint(client)
+    assert "Talk like a pirate." in session["instructions"]
+    assert talker.VOICE_STYLE not in session["instructions"]  # replaced, not appended
 
 
-def test_custom_voice_prompt_reaches_run_turn(client, ctx):
-    _wire_bridge(ctx, overrides={"voice_system_prompt": "Talk like a pirate."})
-    resp = _chat(client)
-    assert resp.status_code == 200
-    prompt = ctx.agent.calls[-1]["prompt"]
-    assert prompt.startswith("Talk like a pirate.")
-    assert "real-time VOICE conversation" not in prompt
+def test_talker_extra_lands_last_in_instructions(client, ctx):
+    anyio.run(_prewire, ctx, {"talker_extra": "Always answer in French."})
+    session = _mint(client)
+    assert session["instructions"].rstrip().endswith("Always answer in French.")
 
 
-def test_custom_triage_prompt_reaches_run_llm(client, ctx):
-    seen = {}
-
-    async def run_llm(prompt, *, system=None, **kw):
-        seen["system"] = system
-        return "RESPOND"
-
-    _wire_bridge(ctx, overrides={"triage_system": "Custom gate rules."}, run_llm=run_llm)
-    assert _chat(client).status_code == 200
-    assert seen["system"] == "Custom gate rules."
+def test_turn_eagerness_override_maps_to_semantic_vad(client, ctx):
+    anyio.run(_prewire, ctx, {"turn_eagerness": "eager"})
+    session = _mint(client)
+    vad = session["audio"]["input"]["turn_detection"]
+    assert vad["type"] == "semantic_vad"
+    assert vad["eagerness"] == "high"
 
 
-def test_triage_disabled_skips_the_gate(client, ctx):
-    async def run_llm(prompt, **kw):  # would SKIP everything
-        return "SKIP"
-
-    _wire_bridge(ctx, overrides={"triage_enabled": False}, run_llm=run_llm)
-    resp = _chat(client)
-    assert resp.status_code == 200
-    assert ctx.agent.calls  # the full turn ran — triage never got a veto
+def test_greeting_override_reaches_instructions(client, ctx):
+    anyio.run(_prewire, ctx, {"greeting": "Owner greeting."})
+    session = _mint(client)
+    assert "Owner greeting." in session["instructions"]
+    assert "Hi, Nova here!" not in session["instructions"]
 
 
-# -------------------------------------------------- live identity + auto resync
+# -------------------------------------------------- live identity + resync
 
 
 class _IdentitySection:
@@ -244,13 +213,19 @@ def test_status_reports_live_name_over_snapshot(client, ctx):
     assert data["persona_name"] == "Rayla"  # live identity, not the "Nova" snapshot
 
 
-def test_session_resyncs_persona_after_rename(client, ctx):
-    """Rename in plugin-identity → /session re-fetches the persona and
-    re-PATCHes the ElevenLabs agent so the NEXT call greets with the new name."""
-    from plugin_voice import state as live_state
-
+def test_session_uses_live_name_after_rename(client, ctx):
+    """Rename in plugin-identity → the NEXT minted session already speaks as
+    the new name; no upstream agent to re-patch anymore."""
     anyio.run(_prewire, ctx)
     ctx.config_registry = _FakeConfigRegistry({"name": "Rayla"})
+    resp = client.get(f"{API}/rt/session")
+    assert resp.status_code == 200
+    assert resp.json()["persona_name"] == "Rayla"
+    assert "the live voice of Rayla" in FakeRT.minted[-1]["instructions"]
+
+
+def test_refresh_persona_route_updates_snapshot(client, ctx):
+    anyio.run(_prewire, ctx)
 
     async def run_turn(prompt, **kw):
         if kw.get("output_schema"):
@@ -259,40 +234,16 @@ def test_session_resyncs_persona_after_rename(client, ctx):
         return ("ok", None)
 
     ctx.agent.run_turn = run_turn
-    live_state.end_resync()  # clean slate
-
-    resp = client.get(f"{API}/session")
-    assert resp.status_code == 200
-    assert resp.json()["persona_name"] == "Rayla"  # live name immediately
-
-    task = live_state.resync_task()
-    assert task is not None  # mismatch detected → resync scheduled
-
-    async def _wait():
-        await task
-
-    client.portal.call(_wait)
-
-    patch = FakeEL.agent_configs[-1]
-    assert patch["op"] == "update" and patch["agent_id"] == "agent_x"
-    assert patch["first_message"] == "Rayla here — speak."
-
+    resp = client.post(f"{API}/refresh-persona")
+    assert resp.status_code == 200, resp.text
     stored = json.loads(ctx.vault.data[VAULT_SETTINGS])
     assert stored["persona_name"] == "Rayla"
-    assert live_state.try_begin_resync()  # guard released after the task ended
-    live_state.end_resync()
-
-
-def test_session_no_resync_when_name_matches(client, ctx):
-    anyio.run(_prewire, ctx)
-    ctx.config_registry = _FakeConfigRegistry({"name": "Nova"})
-    resp = client.get(f"{API}/session")
-    assert resp.status_code == 200
-    assert FakeEL.agent_configs == []  # nothing to fix, no ElevenLabs writes
+    assert stored["greeting"] == "Rayla here — speak."
 
 
 def test_resync_persona_keeps_owner_overrides(ctx):
-    """The background resync must not clobber the owner's saved greeting."""
+    """Resync must not clobber the owner's saved greeting override or an
+    explicit voice pick."""
     async def scenario():
         await _prewire(ctx, overrides={"greeting": "Owner greeting."})
 
@@ -303,10 +254,12 @@ def test_resync_persona_keeps_owner_overrides(ctx):
             return ("ok", None)
 
         ctx.agent.run_turn = run_turn
-        await setup.resync_persona(ctx, FakeEL(), "agent_x")
+        await setup.resync_persona(ctx)
 
     anyio.run(scenario)
-    patch = FakeEL.agent_configs[-1]
-    assert patch["first_message"] == "Owner greeting."   # override survives
     stored = json.loads(ctx.vault.data[VAULT_SETTINGS])
     assert stored["persona_name"] == "Rayla"             # snapshot converges
+    assert stored["rt_voice"] == "cedar"                 # explicit pick kept
+    assert stored[persona_config.OVERRIDES_KEY]["greeting"] == "Owner greeting."
+    # and the merge still favors the owner:
+    assert persona_config.effective(stored)["greeting"] == "Owner greeting."

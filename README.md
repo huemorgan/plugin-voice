@@ -1,51 +1,75 @@
 # plugin-voice
 
-Voice conversations with your Luna agent — that know **who is speaking** and
-sound like **who your agent actually is**.
+Full-duplex, interruptible voice conversations with your Luna agent — that
+know **who is speaking** and sound like **who your agent actually is**.
 
-Built on the plugin-talk architecture (ElevenLabs Agents carries audio; your
-agent's own loop stays the brain via an OpenAI-compatible SSE bridge), plus:
+Since 0.5.0 the audio path is **OpenAI Realtime speech-to-speech** (WebRTC,
+browser ⇄ OpenAI directly). The plugin works in three lanes:
 
-- **Personality-matched setup.** On connect, the *brain configures itself*: it
-  states its name, writes its own greeting ("This is T-800. I am online. State
-  your objective."), chooses its waiting fillers ("Running tactical
-  assessment... ") used both as ElevenLabs soft-timeout speech and bridge
-  keepalives, and picks the ElevenLabs voice that fits its personality — all
-  automatic, all falling back to neutral defaults if the brain doesn't answer.
-- **Owner voice imprint.** In Settings you read five phrases; the plugin builds
-  a spectral voice profile (numpy-only, calibrated + cohort-z-normalized —
-  see `tests/dojo/report.md`: ~6.7% EER on a 10-voice ElevenLabs matrix).
-- **Live speaker check.** During a call the widget streams mic audio to your
-  Luna (never further), scores it against your imprint each second, shows
-  "● You" vs "● Unrecognized voice", and annotates the brain's prompt when the
-  speaker doesn't sound like you — so the agent can be appropriately careful.
-  Advisory by design: this is useful signal, not biometric security.
+- **Talking.** The realtime model speaks *as* your agent: at connect time the
+  plugin replicates the agent's live name, greeting, waiting phrases, and
+  attitude into the talker's instructions. Not the same model — but the same
+  persona, close enough that a call feels like the same character.
+- **Knowledge.** Read-only info tools (memory, wiki, files, …) are brokered
+  straight to the talker, so "what did we decide about X?" gets answered
+  mid-sentence without waking the full agent. A positive read-allowlist plus a
+  write-veto keeps this lane strictly look-don't-touch.
+- **Doing.** Real work is dispatched to your actual Luna agent in the
+  background (`luna_do`). The talker narrates ("working on it — let's keep
+  thinking meanwhile…"), checks status, and speaks a short summary when the
+  task lands. Full details go to your chat; the agent's raw text is never
+  read aloud verbatim.
+
+Plus the **owner voice imprint** (unchanged from 0.4.x): record a few phrases
+in Settings; the plugin builds a spectral voice profile (numpy-only,
+calibrated + cohort-z-normalized — see `tests/dojo/report.md`: ~6.7% EER on a
+10-voice synthetic matrix) and shows "● You" vs "● Unrecognized voice" live
+during a call. With the owner lock on, unrecognized speakers can talk but not
+use tools. Advisory by design — useful signal, not biometric security.
+Imprint scoring runs on your Luna; that audio never goes further.
 
 ## Setup
 
-1. Install (needs `plugin-vault`; voice recognition additionally needs `numpy`
+1. Install (needs `plugin-vault`; the voice imprint additionally needs `numpy`
    on the Luna machine — everything else works without it).
-2. Settings → Voice: paste your ElevenLabs API key → Connect. The agent
-   provisions itself, personality and all.
-3. Record the five imprint phrases in the same tab.
-4. Click the sidebar **Voice** widget and talk.
+2. Settings → Voice: paste an **OpenAI API key** → Connect (or use a granted /
+   gateway / `LUNA_OPENAI_API_KEY` env key — the plugin resolves in that
+   order). The agent then provisions its own persona: greeting, waiting
+   phrases, and the realtime voice that fits its personality.
+3. Optionally record the imprint phrases in the same tab.
+4. Click the sidebar **Voice** widget and talk. Interrupt freely — it stops.
 
-Self-hosted Lunas must be publicly reachable for ElevenLabs to call the bridge
-(e.g. `cloudflared tunnel`); hosted tenants need nothing extra.
+No tunnel, no public URL: audio is WebRTC from your browser to OpenAI; your
+Luna only mints short-lived client secrets and serves the in-call tools.
+
+The Persona tab (Settings → Voice) tunes the talker: realtime voice,
+greeting/waiting-phrase overrides, turn eagerness, speaking-style prompt, and
+extra instructions.
+
+## History
+
+Versions ≤ 0.4.x rode ElevenLabs Agents with an OpenAI-compatible SSE bridge
+into the agent's own loop (the plugin-talk architecture), which required the
+Luna to be publicly reachable. That path was removed in 0.5.0 — no bridge, no
+tunnel. [plugin-talk](https://github.com/huemorgan/plugin-talk) remains the
+ElevenLabs sibling if you prefer that stack.
 
 ## Dojo
 
-`EL_KEY=sk_... .venv/bin/python tests/dojo/run_dojo.py` — synthesizes a matrix
-of ElevenLabs voices, enrolls each as owner in turn, sweeps the decision
-threshold, regenerates `plugin_voice/dsp_calibration.py` (whitening + cohort +
-tuned threshold), and writes the accuracy report.
+`EL_KEY=sk_... .venv/bin/python tests/dojo/run_dojo.py` — synthesizes a
+matrix of test voices (ElevenLabs TTS, dev-only tooling), enrolls each as
+owner in turn, sweeps the decision threshold, regenerates
+`plugin_voice/dsp_calibration.py` (whitening + cohort + tuned threshold), and
+writes the accuracy report. Run it after touching `dsp.py`.
 
 ## Tests
 
 ```bash
-pip install -e ".[dev]" && pytest          # 54 unit + dojo-style route tests
+cd plugins/plugin-voice
+.venv/bin/python -m pytest -q
 ```
 
+`tests/test_live_openai.py` needs `LUNA_OPENAI_API_KEY` set — it mints a real
+client secret against the Realtime API; skipped otherwise.
+
 Source: https://github.com/huemorgan/plugin-voice — MIT.
-Sibling: [plugin-talk](https://github.com/huemorgan/plugin-talk) — the simple
-version without recognition/personality.

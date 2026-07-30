@@ -1,31 +1,27 @@
-"""Voice-persona settings — every previously hardcoded knob, owner-editable.
+"""Voice-persona settings — the talker's owner-editable knobs.
 
 Three layers, first hit wins:
 
 1. **overrides** — what the owner saved in the Voice Persona tab, stored
    under ``persona_overrides`` inside the plugin's settings JSON;
 2. **auto** — what the agent's own personality produced at connect /
-   refresh time (``greeting`` / ``fillers`` in settings);
-3. **defaults** — the shipped values below (identical to the constants that
-   used to live in bridge.py / elevenlabs.py, so an untouched install
-   behaves exactly as before).
+   re-match time (``greeting`` / ``fillers`` in settings);
+3. **defaults** — the shipped values below. ``voice_system_prompt`` and
+   ``talker_extra`` default to None: the talker's built-in style prompt
+   (talker.VOICE_STYLE) applies unless the owner overrides it.
+
+Engine knobs (``rt_voice``, ``rt_model``, ``rt_lock_tools_to_owner``,
+``rt_tools_allow``, ``rt_tools_deny``) live at the settings top level — they
+configure the session, not the persona — and are edited via ``POST /settings``.
+Stored overrides for fields dropped in 0.5.0 (triage, timeouts, passthrough)
+are ignored harmlessly: the merge only knows the current DEFAULTS.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from . import bridge
-
 OVERRIDES_KEY = "persona_overrides"
-
-# ElevenLabs passthrough prompt (the agent-level prompt; every real reply
-# comes from the custom LLM bridge, this only frames it).
-PASSTHROUGH_PROMPT = (
-    "Every reply is produced by the connected custom LLM "
-    "(the agent's own loop, with its real name and "
-    "personality); pass conversation through faithfully."
-)
 
 NEUTRAL_GREETING = "Hey, I'm listening — what can I do for you?"
 NEUTRAL_FILLERS = [
@@ -38,24 +34,14 @@ TURN_EAGERNESS_VALUES = ("eager", "normal", "patient")
 
 # greeting/fillers default to None: "auto" — use the personality-fetched
 # value from settings, else the neutral fallbacks above.
+# voice_system_prompt/talker_extra None → the talker's shipped style.
 DEFAULTS: dict[str, Any] = {
     "greeting": None,
     "fillers": None,
-    "voice_system_prompt": bridge.VOICE_SYSTEM_PROMPT,
-    "triage_enabled": True,
-    "triage_system": bridge.TRIAGE_SYSTEM,
-    "passthrough_prompt": PASSTHROUGH_PROMPT,
-    "soft_timeout_seconds": 5.0,
-    "max_soft_timeouts": 3,
+    "voice_system_prompt": None,
+    "talker_extra": None,
     "turn_eagerness": "patient",
 }
-
-# Fields that live in the ElevenLabs agent config — changing one requires a
-# re-PATCH of the agent; the rest apply on the next bridge turn.
-ELEVENLABS_FIELDS = frozenset(
-    {"greeting", "fillers", "passthrough_prompt", "soft_timeout_seconds",
-     "max_soft_timeouts", "turn_eagerness"}
-)
 
 
 class PersonaConfigError(ValueError):
@@ -84,18 +70,6 @@ def effective(settings: dict) -> dict:
         if key in ov:
             out[key] = ov[key]
     return out
-
-
-def elevenlabs_overrides(settings: dict) -> dict:
-    """The kwargs handed to ElevenLabs agent create/update calls, resolved
-    from the effective config (so PATCHes never reset an owner tweak)."""
-    eff = effective(settings)
-    return {
-        "passthrough_prompt": eff["passthrough_prompt"],
-        "soft_timeout_seconds": eff["soft_timeout_seconds"],
-        "max_soft_timeouts": eff["max_soft_timeouts"],
-        "turn_eagerness": eff["turn_eagerness"],
-    }
 
 
 def _clean_str(value: Any, field: str, *, max_len: int = 4000) -> str:
@@ -132,23 +106,6 @@ def apply_changes(settings: dict, changes: dict) -> tuple[dict, set[str]]:
             if len(cleaned) > 5:
                 raise PersonaConfigError("at most 5 filler phrases")
             new = cleaned
-        elif field == "triage_enabled":
-            if not isinstance(value, bool):
-                raise PersonaConfigError("triage_enabled must be true or false")
-            new = value
-        elif field == "soft_timeout_seconds":
-            try:
-                new = float(value)
-            except (TypeError, ValueError):
-                raise PersonaConfigError("soft_timeout_seconds must be a number") from None
-            if not 1.0 <= new <= 30.0:
-                raise PersonaConfigError("soft_timeout_seconds must be between 1 and 30")
-        elif field == "max_soft_timeouts":
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise PersonaConfigError("max_soft_timeouts must be a whole number")
-            if not 0 <= value <= 10:
-                raise PersonaConfigError("max_soft_timeouts must be between 0 and 10")
-            new = value
         elif field == "turn_eagerness":
             new = str(value).strip().lower()
             if new not in TURN_EAGERNESS_VALUES:
@@ -157,7 +114,7 @@ def apply_changes(settings: dict, changes: dict) -> tuple[dict, set[str]]:
                 )
         elif field == "greeting":
             new = _clean_str(value, field, max_len=300)
-        else:  # the prompt textareas
+        else:  # the prompt textareas: voice_system_prompt / talker_extra
             new = _clean_str(value, field)
         if ov.get(field) != new:
             ov[field] = new

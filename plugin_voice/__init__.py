@@ -1,24 +1,23 @@
-"""plugin-voice — talk to Luna by voice in the browser.
+"""plugin-voice — full-duplex, interruptible voice conversations with Luna.
 
-ElevenLabs Agents handles the audio loop (mic, STT, TTS, barge-in) between the
-browser and their edge; Luna stays the brain via an OpenAI-compatible bridge
-route this plugin serves (see `bridge.py` / `routes.py`). Authored against
-`luna_sdk` only.
+OpenAI Realtime speech-to-speech does the talking (lane 1) in Luna's persona,
+read-only info tools answer fast questions in-call (lane 2), and the real Luna
+agent runs delegated work in the background (lane 3) — its results come back
+as short spoken summaries, never verbatim text. Authored against `luna_sdk`
+only; everything lives in this plugin.
 """
 
 from __future__ import annotations
 
 import logging
 
-from luna_sdk import LunaPlugin, PluginContext, PluginManifest, SettingsTab, ToolDef, ToolDef, ToolDef
+from luna_sdk import LunaPlugin, PluginContext, PluginManifest, SettingsTab, ToolDef
 
 log = logging.getLogger("plugin-voice")
 
 # Vault keys (all owned by this plugin; ACL-scoped by the vault provider).
-VAULT_API_KEY = "plugin_voice.elevenlabs_api_key"
-VAULT_AGENT_ID = "plugin_voice.agent_id"
-VAULT_BRIDGE_SECRET = "plugin_voice.bridge_secret"
-VAULT_SETTINGS = "plugin_voice.settings"  # non-secret JSON (voice_id, ...); vault used as the plugin's durable KV
+VAULT_OPENAI_KEY = "plugin_voice.openai_api_key"  # 005: realtime S2S talker
+VAULT_SETTINGS = "plugin_voice.settings"  # non-secret JSON; vault used as the plugin's durable KV
 
 
 class VoicePlugin(LunaPlugin):
@@ -26,11 +25,12 @@ class VoicePlugin(LunaPlugin):
         name="plugin-voice",
         shown_name="Voice",
         icon="mic",
-        version="0.4.2",
+        version="0.5.0",
         description=(
-            "Voice conversations that know who is speaking — owner voice "
-            "imprint, personality-matched voice and fillers, ElevenLabs "
-            "audio, Luna stays the brain."
+            "Full-duplex voice conversations that know who is speaking — "
+            "OpenAI Realtime speech-to-speech in this agent's own persona, "
+            "owner voice imprint, in-call knowledge tools, Luna stays the "
+            "hands for real work."
         ),
         category="global",
         depends_on=["plugin-vault"],
@@ -65,11 +65,11 @@ class VoicePlugin(LunaPlugin):
                 st = await setup.build_status(ctx)
             except setup.SetupError as exc:
                 return {"error": str(exc)}
-            st.pop("bridge_secret", None)  # owner-only; never surface to the agent
             st["note"] = (
-                "connected=key resolvable (source in key_source: own/vault/"
-                "gateway/env); agent_ready=ElevenLabs agent provisioned. If "
-                "connected but not agent_ready, call voice_connect to finish."
+                "connected=OpenAI key resolvable (source in key_source: own/"
+                "vault/gateway/env). If not connected, the owner can paste a "
+                "key in Settings → Voice, or call voice_connect after wiring "
+                "a gateway key."
             )
             return st
 
@@ -78,7 +78,6 @@ class VoicePlugin(LunaPlugin):
                 st = await setup.do_connect(ctx)
             except setup.SetupError as exc:
                 return {"connected": False, "error": str(exc)}
-            st.pop("bridge_secret", None)
             st["note"] = "Voice setup complete — the owner can talk via the sidebar Voice widget."
             return st
 
@@ -88,9 +87,9 @@ class VoicePlugin(LunaPlugin):
                 name="voice_status",
                 description=(
                     "Status of the voice (plugin-voice) setup: whether an "
-                    "ElevenLabs/11labs key is available (pasted, vault grant, "
-                    "hosted gateway, or env), whether the voice agent is "
-                    "provisioned, and whether the owner's voice imprint exists."
+                    "OpenAI key is available (pasted, vault grant, hosted "
+                    "gateway, or env), the realtime voice/model in use, and "
+                    "whether the owner's voice imprint exists."
                 ),
                 parameters={"type": "object", "properties": {}},
                 policy="auto_approve",
@@ -105,11 +104,12 @@ class VoicePlugin(LunaPlugin):
                 name="voice_connect",
                 description=(
                     "Complete the voice (plugin-voice) setup using whatever "
-                    "ElevenLabs/11labs key is already available (vault grant, "
-                    "hosted gateway key, or env) — provisions the ElevenLabs "
-                    "voice agent with this agent's own personality. Use after "
-                    "wiring a gateway key, or when voice_status says connected "
-                    "but not agent_ready. No key value is exposed."
+                    "OpenAI key is already available (vault grant, hosted "
+                    "gateway key, or env) — validates the key against the "
+                    "Realtime API and sets up this agent's own persona and "
+                    "voice for the talker. Use after wiring a gateway key, or "
+                    "when voice_status says not connected. No key value is "
+                    "exposed."
                 ),
                 parameters={"type": "object", "properties": {}},
                 policy="ask",
@@ -119,8 +119,3 @@ class VoicePlugin(LunaPlugin):
         )
 
         log.info("plugin-voice loaded (widget=voice, settings tab=voice, tools=2)")
-
-    async def on_unload(self) -> None:
-        from .state import close_client
-
-        await close_client()

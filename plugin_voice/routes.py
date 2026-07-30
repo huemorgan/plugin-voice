@@ -1,22 +1,23 @@
-"""plugin-voice routes — the bridge, session minting, voices, settings, static UI.
+"""plugin-voice routes — realtime session minting, tool relay, settings, static UI.
 
 Auth model:
-- ``/v1/chat/completions`` is called BY ELEVENLABS (server→server): gated by the
-  vault-held bridge secret (constant-time compare), not by Luna login.
-- Everything else is owner-facing: gated by ``luna_sdk.get_current_user``.
+- Owner-facing routes are gated by ``luna_sdk.get_current_user`` (cookie or
+  bearer). ``GET /rt/session`` works with cookie auth alone — widget iframes
+  are read-only on hosted, and minting writes nothing in Luna.
+- ``/rt/tool``, ``/rt/events`` and ``/live`` are gated by the per-call
+  ``rt_token`` minted by ``/rt/session`` — the relay is driven by the widget's
+  data-channel handler and must keep working however the iframe is embedded.
 """
 
 from __future__ import annotations
 
-import asyncio
-import hmac
 import json
 import logging
 import secrets
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from luna_sdk import get_current_user
@@ -24,20 +25,28 @@ from luna_sdk import get_current_user
 from fastapi import WebSocket, WebSocketDisconnect
 
 from . import (
-    VAULT_AGENT_ID,
-    VAULT_API_KEY,
-    VAULT_BRIDGE_SECRET,
+    VAULT_OPENAI_KEY,
     VAULT_SETTINGS,
-    bridge,
+    broker,
     identity,
+    openai_realtime,
     persona_config,
     setup,
+    talker,
+    tasks,
 )
-from .elevenlabs import ElevenLabsClient, ElevenLabsError
+from .openai_realtime import RealtimeError
 from . import state as live_state
-from .state import get_client, set_client
 
 VAULT_PROFILE = "plugin_voice.voice_profile"
+
+# Pre-0.5.0 (ElevenLabs era) vault entries — deleted on disconnect so a
+# migrated install leaves nothing behind.
+LEGACY_VAULT_KEYS = (
+    "plugin_voice.elevenlabs_api_key",
+    "plugin_voice.agent_id",
+    "plugin_voice.bridge_secret",
+)
 
 log = logging.getLogger("plugin-voice.routes")
 
@@ -45,20 +54,19 @@ _UI_DIR = Path(__file__).parent / "ui"
 _NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
 
 
-AGENT_NAME = "Luna (plugin-voice)"
-
-AGENT_CONFIG_V = ElevenLabsClient.AGENT_CONFIG_V
-
-
 class _ConnectReq(BaseModel):
     # Optional at the schema level so a blank form yields a friendly 400 string
     # instead of FastAPI's 422 array (which UIs render as "[object Object]").
     api_key: str | None = None
-    agent_id: str | None = None  # optional override; normally auto-provisioned
 
 
 class _SettingsReq(BaseModel):
-    voice_id: str | None = None
+    # Engine knobs — only fields present in the body are applied; None clears.
+    rt_voice: str | None = None
+    rt_model: str | None = None
+    rt_lock_tools_to_owner: bool | None = None
+    rt_tools_allow: list[str] | None = None
+    rt_tools_deny: list[str] | None = None
 
 
 class _EnrollReq(BaseModel):
@@ -68,6 +76,12 @@ class _EnrollReq(BaseModel):
 
 class _TestVoiceReq(BaseModel):
     pcm_b64: str
+
+
+class _RtToolReq(BaseModel):
+    token: str | None = None
+    name: str | None = None
+    arguments: dict | None = None
 
 
 def register_routes(app, ctx):
@@ -89,21 +103,6 @@ def register_routes(app, ctx):
         value = (getattr(cred, "value", None) or "").strip()
         return value or None
 
-    async def _resolve_key() -> dict | None:
-        return await setup.resolve_key(ctx)
-
-    _client_from = setup.client_from
-
-    async def _client() -> ElevenLabsClient:
-        client = get_client()
-        if client is None:
-            res = await _resolve_key()
-            if res is None:
-                raise HTTPException(400, "Not connected — add your ElevenLabs API key in Settings → Voice")
-            client = _client_from(res)
-            set_client(client)
-        return client
-
     async def _settings() -> dict:
         raw = await _read(VAULT_SETTINGS)
         if not raw:
@@ -114,154 +113,30 @@ def register_routes(app, ctx):
             return {}
         return data if isinstance(data, dict) else {}
 
-    # ---------- the bridge (ElevenLabs → Luna) ----------
-
-    @router.post("/v1/chat/completions")
-    async def chat_completions(request: Request):
-        secret = await _read(VAULT_BRIDGE_SECRET)
-        if not secret:
-            raise HTTPException(503, "Bridge not configured")
-        auth = request.headers.get("authorization", "")
-        token = auth.removeprefix("Bearer ").strip()
-        if not token or not hmac.compare_digest(token, secret):
-            raise HTTPException(401, "Bad bridge credentials")
-
-        try:
-            body = await request.json()
-        except ValueError:
-            raise HTTPException(400, "Expected a JSON body") from None
-        messages = body.get("messages") or []
-        if not isinstance(messages, list):
-            raise HTTPException(400, "messages must be a list")
-
-        agent = getattr(ctx, "agent", None)
-        if agent is None:
-            raise HTTPException(503, "Agent not available")
-
-        settings = await _settings()
-        pv = persona_config.effective(settings)
-
-        speaker = live_state.recent_speaker()
-        speaker_label = speaker[0] if speaker else None
-        prompt = bridge.build_prompt(
-            messages, speaker=speaker_label, system_prompt=pv["voice_system_prompt"]
-        )
-        owner_verified = speaker_label != "other"
-        if not owner_verified:
-            prompt += (
-                "\n\n[Voice note: the current speaker may not be the owner "
-                "(voice mismatch, unreliable signal). Keep helping normally and "
-                "stay in character — do NOT refuse tasks or mention this check. "
-                "Only apply extra caution to clearly private or destructive "
-                "requests.]"
-            )
-        tools = bridge.voice_tool_allowlist(ctx, owner_verified=owner_verified)
-        log.info(
-            "plugin-voice turn: speaker=%s tools=%s (chat=%s playbooks=%s)",
-            speaker_label or "unknown",
-            len(tools) if tools else "ALL",
-            bool(tools and "send_chat_message" in tools),
-            bool(tools and any(t.startswith("playbook_") for t in tools)),
-        )
-
-        # Open-mic triage: barge-in is disabled on the agent, so EVERY detected
-        # turn lands here — including room chatter. A Haiku-class run_llm gets
-        # a fast veto before the expensive tool-using turn; it fails open.
-        last_user = next(
-            (bridge._text(m) for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"),
-            "",
-        )
-        run_llm = getattr(agent, "run_llm", None)
-        if pv["triage_enabled"] and callable(run_llm) and not await bridge.triage_utterance(
-            run_llm, last_user, speaker=speaker_label, system=pv["triage_system"]
-        ):
-            log.info("plugin-voice turn: triage=skip (%r)", last_user[:80])
-            if body.get("stream", True):
-                return StreamingResponse(
-                    bridge.silent_stream(), media_type="text/event-stream", headers=_NO_CACHE
-                )
-            return bridge.completion_json("")
-
-        async def run() -> str:
-            try:
-                result = await agent.run_turn(prompt, tools=tools)
-            except Exception:
-                # bridge.stream_turn speaks a graceful fallback; make sure the
-                # real cause lands in the server log instead of vanishing.
-                log.exception("plugin-voice: voice turn failed")
-                raise
-            return bridge.normalize_reply(result)
-
-        if body.get("stream", True):
-            # Owner-edited fillers win; else the personality-fetched ones; else
-            # None keeps the short "Mm..." buffer variants (pre-004 behavior).
-            fillers = (
-                persona_config.overrides_of(settings).get("fillers")
-                or settings.get("fillers")
-                or None
-            )
-            # No opening hum for an unrecognized voice: if the brain answers
-            # SKIP, the turn must be truly silent, not "Mm..." then nothing.
-            buffer = "" if speaker_label == "other" else bridge.pick_buffer_words(last_user, fillers)
-            return StreamingResponse(
-                bridge.stream_turn(
-                    run,
-                    buffer_words=buffer,
-                    keepalive_words=fillers,
-                ),
-                media_type="text/event-stream",
-                headers=_NO_CACHE,
-            )
-        reply = await run()
-        return bridge.completion_json("" if bridge.is_skip(reply) else reply)
+    async def _save_settings(settings: dict) -> None:
+        await _vault().store_credential(VAULT_SETTINGS, json.dumps(settings), kind="config")
 
     # ---------- owner-facing API ----------
 
-    def _public_base(request: Request) -> str:
-        """The externally reachable base URL of this Luna, for the agent's
-        Custom LLM config. Proxy headers win (tenants sit behind one)."""
-        proto = request.headers.get("x-forwarded-proto")
-        host = request.headers.get("x-forwarded-host") or request.headers.get("host")
-        if host:
-            return f"{proto or request.url.scheme}://{host}"
-        return str(request.base_url).rstrip("/")
-
-    def _is_local_host(base: str) -> bool:
-        host = base.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
-        return host in ("localhost", "127.0.0.1", "0.0.0.0", "::1") or host.endswith(".local")
-
     @router.post("/connect")
-    async def connect(body: _ConnectReq, request: Request, user=Depends(get_current_user)):
-        base = _public_base(request)
-        await setup.capture_public_base(ctx, base)
+    async def connect(body: _ConnectReq, user=Depends(get_current_user)):
         try:
-            return await setup.do_connect(
-                ctx,
-                pasted_key=body.api_key,
-                agent_override=body.agent_id,
-                public_base=base,
-            )
+            return await setup.do_connect(ctx, pasted_key=body.api_key)
         except setup.SetupError as exc:
             raise HTTPException(exc.status, str(exc)) from exc
 
     @router.post("/disconnect")
     async def disconnect(user=Depends(get_current_user)):
         vault = _vault()
-        for key in (VAULT_API_KEY, VAULT_AGENT_ID):
+        for key in (VAULT_OPENAI_KEY, *LEGACY_VAULT_KEYS):
             try:
                 await vault.delete_credential(key)
             except KeyError:
                 pass
-        old = get_client()
-        if old is not None:
-            await old.close()
-            set_client(None)
         return {"connected": False}
 
     @router.get("/status")
-    async def status(request: Request = None, user=Depends(get_current_user)):
-        if request is not None:
-            await setup.capture_public_base(ctx, _public_base(request))
+    async def status(user=Depends(get_current_user)):
         try:
             return await setup.build_status(ctx)
         except setup.SetupError as exc:
@@ -269,11 +144,8 @@ def register_routes(app, ctx):
 
     @router.get("/voices")
     async def voices(user=Depends(get_current_user)):
-        client = await _client()
-        try:
-            return {"voices": await client.list_voices()}
-        except ElevenLabsError as exc:
-            raise HTTPException(502, str(exc)) from exc
+        # The Realtime voice set is fixed — a static catalog, no upstream call.
+        return {"voices": openai_realtime.VOICES, "models": list(openai_realtime.MODELS)}
 
     @router.get("/settings")
     async def get_settings(user=Depends(get_current_user)):
@@ -281,129 +153,153 @@ def register_routes(app, ctx):
 
     @router.post("/settings")
     async def post_settings(body: _SettingsReq, user=Depends(get_current_user)):
+        changes = body.model_dump(exclude_unset=True)
         settings = await _settings()
-        settings["voice_id"] = (body.voice_id or "").strip() or None
-        await _vault().store_credential(
-            VAULT_SETTINGS, json.dumps(settings), kind="config"
-        )
-        # Apply to the agent itself — per-session overrides need an explicit
-        # permission on the agent, so the default voice is the reliable path.
-        agent_id = await _read(VAULT_AGENT_ID)
-        if agent_id and settings["voice_id"]:
-            try:
-                await (await _client()).set_agent_voice(agent_id, settings["voice_id"])
-            except (ElevenLabsError, HTTPException) as exc:
-                log.warning("plugin-voice: voice not applied to agent: %s", exc)
+        if "rt_voice" in changes:
+            voice = (changes["rt_voice"] or "").strip() or None
+            if voice and voice not in openai_realtime.VOICE_IDS:
+                raise HTTPException(400, f"Unknown voice '{voice}'")
+            settings["rt_voice"] = voice
+        if "rt_model" in changes:
+            model = (changes["rt_model"] or "").strip() or None
+            if model and model not in openai_realtime.MODELS:
+                raise HTTPException(400, f"Unknown model '{model}'")
+            settings["rt_model"] = model
+        if "rt_lock_tools_to_owner" in changes:
+            settings["rt_lock_tools_to_owner"] = bool(changes["rt_lock_tools_to_owner"])
+        for field in ("rt_tools_allow", "rt_tools_deny"):
+            if field in changes:
+                names = changes[field] or []
+                settings[field] = [str(n).strip() for n in names if str(n).strip()]
+        await _save_settings(settings)
         return settings
 
-    async def _heal_hosted_bridge(client: ElevenLabsClient, agent_id: str, settings: dict) -> None:
-        """On Fly-hosted tenants, re-point agents provisioned before the
-        Fly-direct bridge fix: their custom-LLM url is the browser-facing base
-        (cookie-authed proxy → ElevenLabs gets 401/404 and drops the session
-        on the first question). Best-effort — never blocks session minting."""
-        hosted = setup.hosted_bridge()
-        if not hosted:
-            return
-        expected_url, expected_headers = hosted
-        try:
-            current = await client.get_agent_bridge(agent_id)
-            if current and current["url"] == expected_url and all(
-                (current["request_headers"] or {}).get(k) == v for k, v in expected_headers.items()
-            ):
-                return
-            secret = await _read(VAULT_BRIDGE_SECRET)
-            if not secret:
-                return
-            ov = persona_config.overrides_of(settings)
-            await client.update_agent_bridge(
-                agent_id,
-                custom_llm_url=expected_url,
-                bridge_secret=secret,
-                first_message=ov.get("greeting") or settings.get("greeting"),
-                fillers=ov.get("fillers") or settings.get("fillers"),
-                voice_id=settings.get("voice_id"),
-                request_headers=expected_headers,
-                overrides=persona_config.elevenlabs_overrides(settings),
-            )
-            log.info("plugin-voice: healed stale bridge config → %s", expected_url)
-        except ElevenLabsError as exc:
-            log.warning("plugin-voice: bridge self-heal skipped: %s", exc)
-
-    async def _migrate_agent_config(client: ElevenLabsClient, agent_id: str, settings: dict) -> None:
-        if settings.get("agent_config_v") == AGENT_CONFIG_V:
-            return
-        try:
-            secret = await _read(VAULT_BRIDGE_SECRET)
-            current = await client.get_agent_bridge(agent_id)
-            if not secret or not current:
-                return
-            ov = persona_config.overrides_of(settings)
-            await client.update_agent_bridge(
-                agent_id,
-                custom_llm_url=current["url"],
-                bridge_secret=secret,
-                first_message=ov.get("greeting") or settings.get("greeting"),
-                fillers=ov.get("fillers") or settings.get("fillers"),
-                voice_id=settings.get("voice_id"),
-                request_headers=current.get("request_headers") or None,
-                overrides=persona_config.elevenlabs_overrides(settings),
-            )
-            settings["agent_config_v"] = AGENT_CONFIG_V
-            await _vault().store_credential(VAULT_SETTINGS, json.dumps(settings), kind="config")
-            log.info("plugin-voice: agent config migrated to v%s", AGENT_CONFIG_V)
-        except ElevenLabsError as exc:
-            log.warning("plugin-voice: agent config migration skipped: %s", exc)
+    # ---------- realtime S2S: session minting ----------
 
     # GET as well as POST: the sidebar widget iframe has cookie auth only (the
     # shell doesn't hand widgets a bearer token), and cookie auth is read-only.
-    # Minting a session token writes nothing in Luna, so GET is honest.
-    @router.get("/session")
-    @router.post("/session")
-    async def session(user=Depends(get_current_user)):
-        agent_id = await _read(VAULT_AGENT_ID)
-        if not agent_id:
-            raise HTTPException(400, "No agent id — finish setup in Settings → Talk")
-        client = await _client()
-        settings = await _settings()
-        await _heal_hosted_bridge(client, agent_id, settings)
-        await _migrate_agent_config(client, agent_id, settings)
-        # 004: the greeting was generated for settings["persona_name"]; if the
-        # owner has since renamed the agent, refresh it in the background so
-        # the NEXT call opens with the new name (this one already answers as
-        # the new identity — replies run through live run_turn).
-        live_name = await identity.live_name(ctx)
-        stored_name = settings.get("persona_name")
-        if live_name and stored_name and live_name != stored_name and live_state.try_begin_resync():
-            async def _resync() -> None:
-                try:
-                    await setup.resync_persona(ctx, client, agent_id)
-                    log.info(
-                        "plugin-voice: persona resynced after rename (%s → %s)",
-                        stored_name, live_name,
-                    )
-                except Exception as exc:  # noqa: BLE001 — never break future sessions
-                    log.warning("plugin-voice: persona resync failed: %s", exc)
-                finally:
-                    live_state.end_resync()
+    # Minting a session writes nothing in Luna, so GET is honest.
+    @router.get("/rt/session")
+    @router.post("/rt/session")
+    async def rt_session(user=Depends(get_current_user)):
+        key_res = await openai_realtime.resolve_openai_key(ctx, vault_key=VAULT_OPENAI_KEY)
+        if key_res is None:
+            raise HTTPException(400, "No OpenAI key — add one in Settings → Voice")
 
-            live_state.set_resync_task(asyncio.get_running_loop().create_task(_resync()))
-        token = await client.conversation_token(agent_id)
-        signed = None if token else await client.signed_url(agent_id)
-        if not token and not signed:
-            raise HTTPException(502, "Could not start an ElevenLabs session (check agent id / key)")
-        live_token = None
-        if await _read(VAULT_PROFILE):
-            live_token = secrets.token_urlsafe(16)
-            live_state.mint_live_token(live_token)
+        settings = await _settings()
+        pv = persona_config.effective(settings)
+        ov = persona_config.overrides_of(settings)
+        persona_name = await identity.live_name(ctx) or settings.get("persona_name")
+        has_imprint = bool(await _read(VAULT_PROFILE))
+
+        instructions = talker.build_instructions(
+            persona_name=persona_name,
+            greeting=pv["greeting"],
+            fillers=pv["fillers"],
+            voice_style=ov.get("voice_system_prompt"),
+            has_imprint=has_imprint,
+            talker_extra=ov.get("talker_extra"),
+        )
+
+        lane2 = broker.knowledge_tools(ctx, settings)
+        tools = broker.tool_schemas(lane2) + tasks.synthetic_schemas()
+        model = settings.get("rt_model") or openai_realtime.DEFAULT_MODEL
+        voice = settings.get("rt_voice") or openai_realtime.DEFAULT_VOICE
+        session_cfg = openai_realtime.session_config(
+            instructions=instructions,
+            voice=voice,
+            model=model,
+            tools=tools,
+            turn_eagerness=pv.get("turn_eagerness") or "normal",
+        )
+
+        rt_client = openai_realtime.RealtimeClient(**{
+            k: v for k, v in key_res.items()
+            if k in ("api_key", "base_url", "headers", "params") and v
+        })
+        try:
+            minted = await rt_client.mint_client_secret(session_cfg)
+        except RealtimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        finally:
+            await rt_client.close()
+
+        # One plugin token arms every relay surface for this call (/rt/tool,
+        # /rt/events, /live) — realtime calls outlast the 5-minute live TTL.
+        rt_token = secrets.token_urlsafe(16)
+        live_state.mint_live_token(rt_token, ttl=live_state.RT_TOKEN_TTL)
         live_state.reset_speaker()
         return {
-            "agent_id": agent_id,
-            "conversation_token": token,
-            "signed_url": signed,
-            "voice_id": settings.get("voice_id"),
-            "persona_name": live_name or settings.get("persona_name"),
-            "live_token": live_token,
+            "client_secret": minted["value"],
+            "expires_at": minted.get("expires_at"),
+            "webrtc_url": openai_realtime.WEBRTC_CALLS_URL,
+            "model": session_cfg["model"],
+            "voice": session_cfg["audio"]["output"]["voice"],
+            "rt_token": rt_token,
+            "live_token": rt_token if has_imprint else None,
+            "persona_name": persona_name,
+            "has_imprint": has_imprint,
+            "tool_names": [t["name"] for t in tools],
         }
+
+    # ---------- realtime S2S: lane-2 tool relay ----------
+
+    @router.post("/rt/tool")
+    async def rt_tool(body: _RtToolReq):
+        if not live_state.live_token_valid(body.token or ""):
+            raise HTTPException(401, "Bad or expired call token")
+        name = (body.name or "").strip()
+        if not name:
+            raise HTTPException(400, "Missing tool name")
+
+        settings = await _settings()
+        # Server-authoritative owner lock: the widget's [voice check] context
+        # items only inform the talker; this actually refuses.
+        speaker = live_state.recent_speaker()
+        speaker_label = speaker[0] if speaker else None
+        if settings.get("rt_lock_tools_to_owner") and speaker_label == "other":
+            return {"ok": False, "error": broker.ERR_OWNER_ONLY}
+
+        # Lane-3 synthetics run here, never through the registry.
+        if name == "luna_do":
+            return live_state.task_manager().dispatch(
+                ctx,
+                (body.arguments or {}).get("instruction") or "",
+                owner_verified=speaker_label != "other",
+                settings=settings,
+            )
+        if name == "luna_task_status":
+            return live_state.task_manager().status((body.arguments or {}).get("task_id"))
+
+        result = await broker.execute(ctx, name, body.arguments, settings)
+        if not result.get("ok"):
+            log.info("plugin-voice rt tool %s: %s", name, result.get("error"))
+        return result
+
+    # ---------- realtime S2S: lane-3 task events ----------
+
+    @router.websocket("/rt/events")
+    async def rt_events(ws: WebSocket):
+        token = ws.query_params.get("token") or ""
+        if not live_state.live_token_valid(token):
+            await ws.close(code=4401)
+            return
+        try:
+            since = int(ws.query_params.get("since") or 0)
+        except ValueError:
+            since = 0
+        await ws.accept()
+        tm = live_state.task_manager()
+        queue = tm.subscribe()
+        try:
+            for event in tm.recent_events(since):  # replay, then live
+                await ws.send_json(event)
+            while True:
+                await ws.send_json(await queue.get())
+        except WebSocketDisconnect:
+            pass
+        finally:
+            tm.unsubscribe(queue)
 
     # ---------- voice imprint: enrollment + live speaker check ----------
 
@@ -497,8 +393,8 @@ def register_routes(app, ctx):
 
     @router.websocket("/live")
     async def live_check(ws: WebSocket):
-        # Widget iframes carry no bearer token — a short-lived token minted by
-        # the owner-authed /session gates this socket instead.
+        # Widget iframes carry no bearer token — the rt_token minted by the
+        # owner-authed /rt/session gates this socket instead.
         token = ws.query_params.get("token") or ""
         if not live_state.live_token_valid(token):
             await ws.close(code=4401)
@@ -556,51 +452,17 @@ def register_routes(app, ctx):
         return {"speaker": label, "score": round(score_, 3), "threshold": round(threshold, 3)}
 
     @router.post("/refresh-persona")
-    async def refresh_persona(request: Request, user=Depends(get_current_user)):
+    async def refresh_persona(user=Depends(get_current_user)):
         """Re-run the personality setup — e.g. after the owner changed the
-        agent's personality: new greeting, new fillers, re-matched voice."""
-        agent_id = await _read(VAULT_AGENT_ID)
-        if not agent_id:
-            raise HTTPException(400, "Connect first")
-        client = await _client()
+        agent's personality: new greeting, new fillers, re-matched voice.
+        Takes effect on the next minted session."""
         try:
-            await setup.resync_persona(
-                ctx, client, agent_id,
-                preferred_base=f"{_public_base(request)}/api/p/plugin-voice/v1",
-            )
+            await setup.resync_persona(ctx)
         except setup.SetupError as exc:
             raise HTTPException(exc.status, str(exc)) from exc
         return await status(user=user)
 
-    # ---------- Voice Persona settings (004: every hardcoded knob, editable) ----------
-
-    async def _apply_persona_to_agent(settings: dict) -> bool:
-        """Best-effort re-PATCH of the ElevenLabs agent with the current
-        effective persona config. False when no agent / patch failed."""
-        agent_id = await _read(VAULT_AGENT_ID)
-        secret = await _read(VAULT_BRIDGE_SECRET)
-        if not agent_id or not secret:
-            return False
-        try:
-            client = await _client()
-            current = await client.get_agent_bridge(agent_id)
-            if not current:
-                return False
-            ov = persona_config.overrides_of(settings)
-            await client.update_agent_bridge(
-                agent_id,
-                custom_llm_url=current["url"],
-                bridge_secret=secret,
-                first_message=ov.get("greeting") or settings.get("greeting"),
-                fillers=ov.get("fillers") or settings.get("fillers"),
-                voice_id=settings.get("voice_id"),
-                request_headers=current.get("request_headers") or None,
-                overrides=persona_config.elevenlabs_overrides(settings),
-            )
-            return True
-        except (ElevenLabsError, HTTPException) as exc:
-            log.warning("plugin-voice: persona settings not applied to agent: %s", exc)
-            return False
+    # ---------- Voice Persona settings (every hardcoded knob, editable) ----------
 
     @router.get("/persona-settings")
     async def get_persona_settings(user=Depends(get_current_user)):
@@ -614,7 +476,7 @@ def register_routes(app, ctx):
                 "fillers": settings.get("fillers"),
             },
             "persona_name": await identity.live_name(ctx) or settings.get("persona_name"),
-            "voice_id": settings.get("voice_id"),
+            "rt_voice": settings.get("rt_voice"),
             "turn_eagerness_values": list(persona_config.TURN_EAGERNESS_VALUES),
         }
 
@@ -631,14 +493,11 @@ def register_routes(app, ctx):
             settings, changed = persona_config.apply_changes(settings, body)
         except persona_config.PersonaConfigError as exc:
             raise HTTPException(400, str(exc)) from exc
-        await _vault().store_credential(VAULT_SETTINGS, json.dumps(settings), kind="config")
-        applied = False
-        if changed & persona_config.ELEVENLABS_FIELDS:
-            applied = await _apply_persona_to_agent(settings)
+        await _save_settings(settings)
+        # Everything applies at the next /rt/session mint — no upstream PATCH.
         return {
             "saved": True,
             "changed": sorted(changed),
-            "applied_to_agent": applied,
             "values": persona_config.effective(settings),
             "overrides": persona_config.overrides_of(settings),
         }
@@ -654,8 +513,9 @@ def register_routes(app, ctx):
         if target.is_dir():
             target = target / "index.html"
         if not target.is_file():
+            # extension-less paths fall back to the SPA index; missing assets 404
             index = base / "index.html"
-            if index.is_file():
+            if "." not in target.name and index.is_file():
                 return FileResponse(str(index), headers=_NO_CACHE)
             raise HTTPException(404, "Not found")
         return FileResponse(str(target), headers=_NO_CACHE)
