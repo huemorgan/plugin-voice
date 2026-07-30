@@ -9,6 +9,9 @@ The pane opens **like a left-pane page but with no left-pane link** — it exist
 ## Status
 
 - Mock (`mock/index.html` + `mock/head.bin` + `assets/extract_head.mjs`) is done and validated: 60fps at 24k points, real scanned head with baked `jawOpen` articulation, all shapes morphing seamlessly. The mock still has manual shape chips and rain-style confetti — both are removed/replaced below.
+- **Phases 1, 3, 4 executed** (commits 981ee56, 2f0fb4c, cf6b159 — v0.6.0 on branch `006-luna-view`). E2E scenario 01 passed; 03 passed except the human-mic duplex call (live walkthrough pending); 02 blocked on Phase 2.
+- **Phase 2 (luna core: `hidden` + `luna-open-section`) waits on a user-assigned luna plan number.** Until it lands, the pane is reachable via a visible "Luna" sidebar link — fully functional thanks to the plugin's `/ui/` catch-all route.
+- Local test loop: `~/.luna/managed_plugins/plugin_voice/` runs 0.6.0 on the :3000 Luna (0.5.2 backup at `/tmp/plugin_voice.bak-052`).
 
 ## Product decisions (this revision)
 
