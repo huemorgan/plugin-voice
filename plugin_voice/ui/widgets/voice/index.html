@@ -40,10 +40,26 @@
     font-size: 11px; cursor: pointer; pointer-events: auto;
   }
   #end:hover { border-color: #fff; }
+
+  /* expand to Luna View — YouTube miniplayer pattern: fades in on hover */
+  #expand {
+    position: absolute; top: 4px; right: 6px; z-index: 2;
+    width: 22px; height: 22px; padding: 3px; border: 0; border-radius: 5px;
+    background: rgba(11,14,20,.55); color: var(--fg); cursor: pointer;
+    opacity: 0; transition: opacity .15s;
+  }
+  body:hover #expand { opacity: .85; }
+  #expand:hover { opacity: 1; background: rgba(11,14,20,.85); }
+  #expand svg { width: 100%; height: 100%; display: block; }
 </style>
 </head>
 <body>
 <canvas id="viz" data-testid="voice-viz" title="Talk to Luna"></canvas>
+<button id="expand" data-testid="voice-expand" title="Open Luna View">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>
+  </svg>
+</button>
 <div id="cta" data-testid="voice-cta">Start talking</div>
 <div id="row">
   <span id="who" data-testid="voice-who" style="display:none; font-size:11px; margin-right:2px;"></span>
@@ -67,6 +83,7 @@
 
   var call = null;           // live LunaRT handle
   var agentName = "Agent";   // live identity name, else persona_name from /rt/session
+  var muted = false;
 
   // Bearer token, when the shell provides one (?token= or luna-auth
   // postMessage). Widget iframes normally ride on cookie auth alone, but the
@@ -180,13 +197,14 @@
     } else if (mode === "thinking") {
       // calm violet pulse — Luna is working (tool calls look alive, not broken)
       var pulse = 6 + Math.sin(t * 0.003) * 4;
-      wave(userHist, "#2dd4bf", h * USER_Y, 26, t, 0);
+      wave(userHist, muted ? "rgba(45,212,191,.25)" : "#2dd4bf", h * USER_Y, 26, t, 0);
       wave(new Array(HIST).fill(0.25), "#a78bfa", h * LUNA_Y, pulse, t, 2);
     } else {
-      wave(userHist, "#2dd4bf", h * USER_Y, 26, t, 0);   // you
+      wave(userHist, muted ? "rgba(45,212,191,.25)" : "#2dd4bf", h * USER_Y, 26, t, 0);  // you
       wave(lunaHist, "#a78bfa", h * LUNA_Y, 30, t, 2);   // luna
     }
     pushVolumes();
+    broadcastViz();
     requestAnimationFrame(draw);
   }
 
@@ -210,6 +228,10 @@
         onStatus: function (text) { setStatus(text); },
         onState: function (st) { setMode(st); },
         onWho: setWho,
+        onReact: function (shape) {
+          // Luna picked a Luna View reaction — the pane renders it
+          if (viz) viz.postMessage({ type: "react", shape: shape });
+        },
         onRemoteStream: function (stream) {
           remoteAudio.srcObject = stream;
           lunaAnalyser = makeAnalyser(stream);
@@ -217,8 +239,10 @@
         onEnd: function (reason) {
           call = null;
           micAnalyser = null; lunaAnalyser = null;
+          setMuted(false);
           if (reason) { setMode("error"); setStatus(reason, true); }
           else { setMode("idle"); setLive(false); setStatus(""); }
+          broadcastViz(true);
         },
       });
       micAnalyser = makeAnalyser(call.micStream);
@@ -252,6 +276,53 @@
       }
     };
   } catch (e) { /* older browsers: no channel, no pause */ }
+
+  // ------------------------------------------------------- Luna View feed →
+  // The widget owns the session; the Luna View pane is a renderer of this
+  // feed and sends commands back (start/end/mute). ~30Hz, four numbers.
+  var viz = null;
+  try { viz = new BroadcastChannel("plugin-voice-viz"); } catch (e) {}
+  var lastViz = 0;
+
+  function setMuted(on) {
+    muted = !!on;
+    if (call && call.setMuted) { call.setMuted(muted); }
+  }
+
+  function broadcastViz(force) {
+    if (!viz) { return; }
+    var now = performance.now();
+    if (!force && now - lastViz < 33) { return; }
+    lastViz = now;
+    viz.postMessage({
+      type: "viz", state: mode, muted: muted, owner: "widget",
+      userLevel: muted ? 0 : userHist[HIST - 1], lunaLevel: lunaHist[HIST - 1],
+    });
+  }
+
+  if (viz) {
+    viz.onmessage = function (e) {
+      var m = e.data;
+      if (!m || !m.cmd) { return; }
+      if (m.cmd === "ping") {
+        viz.postMessage({ type: "pong", owner: "widget", live: !!call });
+      } else if (m.cmd === "start" && !call) {
+        start();
+      } else if (m.cmd === "end" && call) {
+        stop();
+      } else if (m.cmd === "mute" && call) {
+        setMuted(!!m.on);
+        broadcastViz(true);
+      }
+    };
+  }
+
+  // expand to Luna View — the shell opens the (hidden) section
+  document.getElementById("expand").addEventListener("click", function () {
+    try {
+      window.parent.postMessage({ type: "luna-open-section", section: "luna-view" }, location.origin);
+    } catch (e) {}
+  });
 
   endBtn.addEventListener("click", stop);
   cta.addEventListener("click", start);

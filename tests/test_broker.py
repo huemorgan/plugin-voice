@@ -244,5 +244,8 @@ def test_rt_tool_owner_lock(client, ctx, rt_token):
 
 def test_rt_session_lists_lane2_tools(client, ctx, rt_token):
     data = client.get("/api/p/plugin-voice/rt/session").json()
-    # lane-2 selection + the lane-3 synthetics (phase 03)
-    assert set(data["tool_names"]) == {"get_weather", "list_files", "luna_do", "luna_task_status"}
+    # lane-2 selection + the lane-3 synthetics (phase 03) + the UI-only
+    # Luna View reaction tool (006)
+    assert set(data["tool_names"]) == {
+        "get_weather", "list_files", "luna_do", "luna_task_status", "luna_view_react",
+    }

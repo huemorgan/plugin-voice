@@ -25,7 +25,7 @@ class VoicePlugin(LunaPlugin):
         name="plugin-voice",
         shown_name="Voice",
         icon="mic",
-        version="0.5.2",
+        version="0.6.0",
         description=(
             "Full-duplex voice conversations that know who is speaking — "
             "OpenAI Realtime speech-to-speech in this agent's own persona, "
@@ -50,6 +50,19 @@ class VoicePlugin(LunaPlugin):
         # PluginManifest.widgets is pydantic-validated, so a plain dict works.
         widgets=[
             {"id": "voice", "slot": "sidebar.bottom", "label": "Voice", "height": 90},
+        ],
+        # Luna View — the full-pane dot avatar. `hidden` needs a luna core
+        # that knows the field (pydantic extra="ignore" elsewhere): new cores
+        # keep it out of the left nav and open it via the widget's expand
+        # button; older cores simply show a visible "Luna" link. Both work.
+        sidebar_sections=[
+            {
+                "id": "luna-view",
+                "label": "Luna",
+                "icon": "sparkles",
+                "path": "ui/view/",
+                "hidden": True,
+            },
         ],
     )
 

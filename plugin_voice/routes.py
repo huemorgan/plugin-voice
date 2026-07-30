@@ -179,6 +179,32 @@ def register_routes(app, ctx):
     # GET as well as POST: the sidebar widget iframe has cookie auth only (the
     # shell doesn't hand widgets a bearer token), and cookie auth is read-only.
     # Minting a session writes nothing in Luna, so GET is honest.
+    # Luna View reaction tool: UI-only — rt-client intercepts it in the
+    # browser and animates the dot avatar; it never reaches /rt/tool. Listed
+    # here so the talker knows it exists.
+    _VIEW_REACT_SCHEMA = {
+        "type": "function",
+        "name": "luna_view_react",
+        "description": (
+            "Show a visual reaction on the Luna View avatar. Use SPARINGLY, "
+            "only when clearly fitting: heart (affection, thanks), thumb "
+            "(agreement, nice work), rocket (launch, shipping something), "
+            "arm (strength, 'we got this'), fireworks (a real win worth "
+            "celebrating). Never announce that you did it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "shape": {
+                    "type": "string",
+                    "enum": ["heart", "thumb", "rocket", "arm", "fireworks"],
+                    "description": "The reaction to display",
+                }
+            },
+            "required": ["shape"],
+        },
+    }
+
     @router.get("/rt/session")
     @router.post("/rt/session")
     async def rt_session(user=Depends(get_current_user)):
@@ -202,7 +228,7 @@ def register_routes(app, ctx):
         )
 
         lane2 = broker.knowledge_tools(ctx, settings)
-        tools = broker.tool_schemas(lane2) + tasks.synthetic_schemas()
+        tools = broker.tool_schemas(lane2) + tasks.synthetic_schemas() + [_VIEW_REACT_SCHEMA]
         model = settings.get("rt_model") or openai_realtime.DEFAULT_MODEL
         voice = settings.get("rt_voice") or openai_realtime.DEFAULT_VOICE
         session_cfg = openai_realtime.session_config(
@@ -272,6 +298,10 @@ def register_routes(app, ctx):
             )
         if name == "luna_task_status":
             return live_state.task_manager().status((body.arguments or {}).get("task_id"))
+        if name == "luna_view_react":
+            # Normally intercepted client-side; if it lands here (old cached
+            # rt-client), succeed quietly — it's a visual, nothing to execute.
+            return {"ok": True}
 
         result = await broker.execute(ctx, name, body.arguments, settings)
         if not result.get("ok"):
@@ -529,5 +559,16 @@ def register_routes(app, ctx):
     @router.get("/ui/settings/{path:path}")
     async def settings_ui(path: str = ""):
         return _serve(_UI_DIR / "settings", path)
+
+    @router.get("/ui/view/{path:path}")
+    async def view_ui(path: str = ""):
+        return _serve(_UI_DIR / "view", path)
+
+    # Catch-all LAST (FastAPI matches in registration order): today's shell
+    # hardcodes plugin pane iframes to /api/p/<plugin>/ui/, so the pane root
+    # must also serve Luna View for cores that don't know SidebarSection.path.
+    @router.get("/ui/{path:path}")
+    async def pane_root_ui(path: str = ""):
+        return _serve(_UI_DIR / "view", path)
 
     app.include_router(router)

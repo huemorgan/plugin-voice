@@ -27,6 +27,7 @@
     var onWho = opts.onWho || function () {};       // owner|other|unknown|null
     var onRemoteStream = opts.onRemoteStream || function () {};
     var onEnd = opts.onEnd || function () {};       // (reason: string|null) — null = clean
+    var onReact = opts.onReact || function () {};   // Luna View reaction shape
     var setStatus = opts.onStatus || function () {};
 
     var session = null, pc = null, dc = null, micStream = null;
@@ -177,9 +178,24 @@
     }
 
     async function relayFunctionCall(item) {
-      onState("thinking");
       var args = {};
       try { args = JSON.parse(item.arguments || "{}"); } catch (e) {}
+      // luna_view_react is a UI-only tool: it never leaves the browser — the
+      // reaction goes straight to the Luna View renderer, zero latency.
+      if (item.name === "luna_view_react") {
+        onReact(args.shape || "");
+        send({
+          type: "conversation.item.create",
+          item: {
+            type: "function_call_output",
+            call_id: item.call_id,
+            output: JSON.stringify({ ok: true }),
+          },
+        });
+        send({ type: "response.create" });
+        return;
+      }
+      onState("thinking");
       var out;
       try {
         var r = await fetch(api + "/rt/tool", {
@@ -322,10 +338,18 @@
       } catch (e) { /* imprint tee is best-effort */ }
     }
 
+    var micMuted = false;
     return {
       session: session,
       micStream: micStream,
       end: function () { end(null); },
+      // Mute = disable the mic track (audio keeps flowing as silence, the
+      // connection stays up). The imprint tee hears silence too — harmless.
+      setMuted: function (on) {
+        micMuted = !!on;
+        micStream.getAudioTracks().forEach(function (t) { t.enabled = !micMuted; });
+      },
+      muted: function () { return micMuted; },
     };
   }
 
