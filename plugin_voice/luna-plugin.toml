@@ -30,6 +30,10 @@ Requires plugin-vault and an OpenAI API key (pasted, granted, gateway, or
 env). Audio flows browser ⇄ OpenAI over WebRTC; the imprint check runs on
 lightweight spectral features on your Luna, never leaving it.
 
+The Luna View head model (`head.bin`) is a point-cloud sample of the
+"Face Cap" demo head by [Face Cap](https://www.bannaflak.com/face-cap),
+as distributed with the three.js examples.
+
 Source: https://github.com/huemorgan/plugin-voice
 """
 

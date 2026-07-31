@@ -317,10 +317,11 @@
     };
   }
 
-  // expand to Luna View — the shell opens the (hidden) section
+  // expand to Luna View — luna-navigate (core 062) routes through the same
+  // shell brain as the agent's navigate_to tool; inert on older cores.
   document.getElementById("expand").addEventListener("click", function () {
     try {
-      window.parent.postMessage({ type: "luna-open-section", section: "luna-view" }, location.origin);
+      window.parent.postMessage({ type: "luna-navigate", section: "luna-view" }, location.origin);
     } catch (e) {}
   });
 
