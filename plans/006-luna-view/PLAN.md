@@ -109,6 +109,18 @@ In `mock/index.html`: remove shape chips, add auto choreography + transient stat
 > - Local test loop: rsync the package over `~/.luna/managed_plugins/plugin_voice/` (0.5.2 backup
 >   at `/tmp/plugin_voice.bak-052`) and restart `my-projects/luna` serve on :3000.
 
+> **Retro after Phase 2 (core 062, shipped as luna 0.54.001):** the core side landed as
+> `plans/062-hidden-sections-iframe-navigate` in the luna repo — `SidebarSection.hidden`,
+> a single `navPluginSections` helper feeding all three nav trees, and a general
+> `luna-navigate` window message that reuses `handleUiEvent` (same brain as the agent's
+> `navigate_to`). The widget's expand message was renamed `luna-open-section` →
+> `luna-navigate` before first publish, so only one name ever shipped. Verified in the
+> browser: no "Luna" nav link, expand opens the pane, `luna-navigate` also opens playbooks,
+> unknown sections are ignored. Merged past a concurrent Shell.tsx refactor (chat UI →
+> plugin-chat-ui) with only a version-string conflict — the helper survived because it's
+> module-level, not inline in the nav JSX. Head-model licensing resolved: Face Cap demo
+> head (three.js examples), attribution added to README + manifest description.
+
 ### Phase 4 — Polish
 
 - Connect/disconnect choreography (assemble/disperse), error = brief red shiver.
