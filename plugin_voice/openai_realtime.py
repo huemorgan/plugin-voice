@@ -160,6 +160,14 @@ class RealtimeClient:
         return data
 
 
+# Hard ceiling on a single spoken response (GA field, 1–4096 or "inf",
+# default "inf"). This is a runaway-monologue backstop, not the primary
+# brevity lever — the instructions ask for one or two sentences; this only
+# bites when the model ignores that. Kept generous so a genuine "explain it
+# fully" answer isn't cut mid-sentence.
+DEFAULT_MAX_OUTPUT_TOKENS = 500
+
+
 def session_config(
     *,
     instructions: str,
@@ -167,17 +175,20 @@ def session_config(
     model: str = DEFAULT_MODEL,
     tools: list[dict] | None = None,
     turn_eagerness: str = "normal",
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
 ) -> dict[str, Any]:
     """The ``session`` body for client-secret minting.
 
     Semantic VAD carries the persona's turn-taking patience (mapped from
-    the persona-settings eager/normal/patient values).
+    the persona-settings eager/normal/patient values). ``max_output_tokens``
+    caps a single response so the talker can't run away into a monologue.
     """
     return {
         "type": "realtime",
         "model": model if model in MODELS else DEFAULT_MODEL,
         "instructions": instructions,
         "tools": tools or [],
+        "max_output_tokens": max_output_tokens,
         "audio": {
             "input": {
                 "turn_detection": {

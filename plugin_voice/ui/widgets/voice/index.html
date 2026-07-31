@@ -82,8 +82,10 @@
   var whoEl = document.getElementById("who");
 
   var call = null;           // live LunaRT handle
+  var starting = false;      // guards the ~2s connect window against a 2nd start
   var agentName = "Agent";   // live identity name, else persona_name from /rt/session
   var muted = false;
+  var agentCount = 0;        // subagents (luna_do tasks) currently working
 
   // Bearer token, when the shell provides one (?token= or luna-auth
   // postMessage). Widget iframes normally ride on cookie auth alone, but the
@@ -220,6 +222,11 @@
   var cancelStart = false;   // End arrived mid-connect: tear down on resolve
 
   async function start() {
+    // `call` is only assigned after a multi-second await (fetch + mic + SDP);
+    // the synchronous `starting` latch closes that window so a double-tap or a
+    // pane race can't spin up a second, independent OpenAI session (which would
+    // greet twice and answer every turn from scratch — the "repeats itself,
+    // surprised the second time" bug).
     if (call || starting) { return; }
     if (!window.LunaRT) {
       setLive(true); setMode("error"); setStatus("Voice engine failed to load", true); return;
@@ -237,12 +244,17 @@
           // Luna picked a Luna View reaction — the pane renders it
           if (viz) viz.postMessage({ type: "react", shape: shape });
         },
+        onTask: function (n) {
+          agentCount = n;
+          broadcastViz(true);   // push the working-subagent count to the pane
+        },
         onRemoteStream: function (stream) {
           remoteAudio.srcObject = stream;
           lunaAnalyser = makeAnalyser(stream);
         },
         onEnd: function (reason) {
           call = null;
+          agentCount = 0;
           micAnalyser = null; lunaAnalyser = null;
           setMuted(false);
           if (reason) { setMode("error"); setStatus(reason, true); }
@@ -273,6 +285,8 @@
         return;
       }
       setMode("error"); setStatus(String(err.message || err), true);
+    } finally {
+      starting = false;
     }
   }
 
@@ -319,6 +333,7 @@
     viz.postMessage({
       type: "viz", state: mode, muted: muted, owner: "widget",
       userLevel: muted ? 0 : userHist[HIST - 1], lunaLevel: lunaHist[HIST - 1],
+      agents: agentCount,
     });
   }
 
@@ -348,6 +363,8 @@
       }
       if (!m.cmd) { return; }
       if (m.cmd === "ping") {
+        // Report live while still connecting too, so the pane's 300ms ownership
+        // race defers instead of starting a competing second session.
         viz.postMessage({ type: "pong", owner: "widget", live: !!call || starting });
       } else if (m.cmd === "start" && !call && !starting) {
         start();

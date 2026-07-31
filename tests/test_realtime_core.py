@@ -139,6 +139,12 @@ def test_session_config_falls_back_on_unknown_values():
     assert cfg["audio"]["input"]["turn_detection"]["eagerness"] == "auto"
 
 
+def test_session_config_caps_output_tokens():
+    # A runaway-monologue backstop: default cap present, overridable.
+    assert session_config(instructions="x")["max_output_tokens"] == 500
+    assert session_config(instructions="x", max_output_tokens=120)["max_output_tokens"] == 120
+
+
 # ------------------------------------------------------------- instructions
 
 
@@ -162,6 +168,25 @@ def test_instructions_carry_persona_and_lane_rules():
 def test_instructions_open_mic_only_with_imprint():
     text = talker.build_instructions(persona_name="Luna", has_imprint=True)
     assert "[voice check:" in text
+
+
+def test_instructions_carry_real_personality_and_mission():
+    # The talker must receive the agent's ACTUAL character + mission, not just
+    # its name — otherwise it's a generic assistant wearing the name.
+    text = talker.build_instructions(
+        persona_name="Nova",
+        persona_brief="You are dry and terse. You never gush and you skip pleasantries.",
+        mission="Keep the owner's infrastructure healthy.",
+    )
+    assert "dry and terse" in text
+    assert "Keep the owner's infrastructure healthy." in text
+
+
+def test_instructions_carry_quiet_discipline():
+    # "be quiet" must map to actual silence, not a spoken acknowledgement.
+    text = talker.build_instructions(persona_name="Luna")
+    assert "stay silent" in text
+    assert "do not acknowledge" in text.lower()
 
 
 def test_instructions_owner_style_and_extra_win():
