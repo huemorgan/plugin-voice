@@ -50,6 +50,35 @@ LEGACY_VAULT_KEYS = (
 
 log = logging.getLogger("plugin-voice.routes")
 
+
+async def _owner_conversation_id(ctx) -> object | None:
+    """The conversation a delegated luna_do turn should bind to.
+
+    A voice call has no chat window of its own, so a background ``run_turn``
+    left unbound can't surface approval cards or route ``send_chat_message`` —
+    approval-gated actions then stall forever ("sees the tools, can't use
+    them"). Binding the owner's active conversation is the sanctioned fix.
+
+    Resolved via the SDK-only ``ctx.conversations`` reader (no core imports):
+    the conversation carrying the most recent message is the owner's active
+    chat, matching ``send_chat_message``'s own "most recent" fallback. Any
+    failure degrades to None — today's unbound behavior — and never raises.
+    """
+    reader = getattr(ctx, "conversations", None)
+    if reader is None:
+        return None
+    try:
+        convs = await reader.list()
+        ids = [c.id for c in convs if getattr(c, "id", None) is not None]
+        if not ids:
+            return None
+        recent = await reader.messages(ids, order="desc", limit=1)
+        return recent[0].conversation_id if recent else ids[0]
+    except Exception as exc:  # noqa: BLE001 — never break a tool call on this
+        log.debug("plugin-voice: owner conversation resolve failed: %s", exc)
+        return None
+
+
 _UI_DIR = Path(__file__).parent / "ui"
 _NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
 
@@ -215,7 +244,11 @@ def register_routes(app, ctx):
         settings = await _settings()
         pv = persona_config.effective(settings)
         ov = persona_config.overrides_of(settings)
-        persona_name = await identity.live_name(ctx) or settings.get("persona_name")
+        # The live identity is the source of truth for name AND mission — both
+        # go stale in the connect-time snapshot the moment the owner edits them.
+        live_id = await identity.live_identity(ctx) or {}
+        persona_name = (live_id.get("name") or "").strip() or settings.get("persona_name")
+        mission = (live_id.get("mission") or "").strip() or None
         has_imprint = bool(await _read(VAULT_PROFILE))
 
         instructions = talker.build_instructions(
@@ -225,6 +258,8 @@ def register_routes(app, ctx):
             voice_style=ov.get("voice_system_prompt"),
             has_imprint=has_imprint,
             talker_extra=ov.get("talker_extra"),
+            persona_brief=settings.get("persona_brief"),
+            mission=mission,
         )
 
         lane2 = broker.knowledge_tools(ctx, settings)
@@ -295,6 +330,7 @@ def register_routes(app, ctx):
                 (body.arguments or {}).get("instruction") or "",
                 owner_verified=speaker_label != "other",
                 settings=settings,
+                conversation_id=await _owner_conversation_id(ctx),
             )
         if name == "luna_task_status":
             return live_state.task_manager().status((body.arguments or {}).get("task_id"))

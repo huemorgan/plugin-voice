@@ -63,6 +63,18 @@ def _def_of(item: Any) -> Any:
     return getattr(item, "definition", None) or item
 
 
+def _effective_policy(tool_def: Any) -> str | None:
+    """Policy with the legacy ``gated=True`` flag resolved (falls back to the
+    raw ``.policy`` field on older ToolDefs without the method)."""
+    fn = getattr(tool_def, "effective_policy", None)
+    if callable(fn):
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001
+            pass
+    return getattr(tool_def, "policy", None)
+
+
 def _name_of(item: Any) -> str | None:
     name = getattr(_def_of(item), "name", None)
     return name if isinstance(name, str) and name else None
@@ -106,7 +118,9 @@ def knowledge_tools(ctx: Any, settings: dict) -> list[Any]:
             continue
         if name in DENY:
             continue
-        if getattr(tool_def, "policy", None) != "auto_approve" or risk != "low":
+        # effective_policy resolves the legacy gated=True flag — a gated tool
+        # left at default auto_approve must NOT read as safe-for-voice.
+        if _effective_policy(tool_def) != "auto_approve" or risk != "low":
             continue
         if getattr(item, "skill_gated", False) or getattr(tool_def, "skill_gated", False):
             continue

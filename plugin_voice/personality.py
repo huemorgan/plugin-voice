@@ -49,16 +49,28 @@ PERSONA_SCHEMA: dict[str, Any] = {
                 "you: gender, age feel, tone, pace, accent."
             ),
         },
+        "persona_brief": {
+            "type": "string",
+            "description": (
+                "3-6 sentences of DIRECTION for a voice actor playing you, "
+                "written in the second person ('You are...'). Capture your "
+                "personality, attitude, humor, and speaking style — your verbal "
+                "tics, how blunt or warm you are, what you would and would not "
+                "say. This is what makes the voice sound like YOU and not a "
+                "generic assistant, so be specific and true to your character."
+            ),
+        },
     },
-    "required": ["name", "greeting", "fillers", "voice_description"],
+    "required": ["name", "greeting", "fillers", "voice_description", "persona_brief"],
 }
 
 PERSONA_PROMPT = (
     "You are being connected to a real-time VOICE interface. Answer with JSON "
     "describing how you should sound. Use your REAL given name (the identity "
     "name your owner configured, e.g. what they call you in chat) — never a "
-    "roleplay/persona character name. Greeting and fillers should still carry "
-    "your personality and current character."
+    "roleplay/persona character name. Greeting, fillers, and persona_brief "
+    "should carry your real personality and current character — write the "
+    "persona_brief so a stranger reading it would speak exactly like you."
 )
 
 NEUTRAL = {
@@ -66,6 +78,7 @@ NEUTRAL = {
     "greeting": "Hey, I'm listening — what can I do for you?",
     "fillers": ["One moment, I'm checking that...", "Still working on it...", "Almost there, hang on..."],
     "voice_description": None,
+    "persona_brief": None,
 }
 
 
@@ -76,6 +89,7 @@ def _clean_persona(raw: Any) -> dict | None:
     greeting = str(raw.get("greeting") or "").strip()[:300]
     fillers = [str(f).strip()[:80] for f in (raw.get("fillers") or []) if str(f).strip()][:5]
     voice_desc = str(raw.get("voice_description") or "").strip()[:300]
+    persona_brief = str(raw.get("persona_brief") or "").strip()[:1500]
     if not name or not greeting:
         return None
     # TTS-safe fillers: ellipsis + trailing space (reads as a natural pause)
@@ -85,6 +99,7 @@ def _clean_persona(raw: Any) -> dict | None:
         "greeting": greeting,
         "fillers": fillers or list(NEUTRAL["fillers"]),
         "voice_description": voice_desc or None,
+        "persona_brief": persona_brief or None,
     }
 
 

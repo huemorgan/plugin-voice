@@ -59,6 +59,17 @@ async def test_dispatch_returns_immediately_then_completes(ctx):
     await _drain(tm)
 
 
+async def test_dispatch_binds_conversation_id(ctx):
+    # A delegated turn must be bound to the owner's chat so send_chat_message
+    # and approval cards resolve there (the doing-lane fix).
+    ctx.agent = SlowAgent()
+    tm = TaskManager()
+    tm.dispatch(ctx, "do it", owner_verified=True, settings={}, conversation_id="conv-123")
+    ctx.agent.gate.set()
+    await _drain(tm)
+    assert ctx.agent.calls[0]["conversation_id"] == "conv-123"
+
+
 async def test_all_subscribers_receive_events(ctx):
     ctx.agent = SlowAgent()
     tm = TaskManager()

@@ -403,6 +403,80 @@ var bufTo = makeBuf(locTo, toArr, 4);
 var bufJaw = makeBuf(locJaw, zeroJaw, 3);
 makeBuf(locSeed, seeds, 1);
 
+// ------------------------------------------------- subagent clusters (loader) →
+// When Luna delegates background work (luna_do), each working subagent shows as
+// a small cluster of dots that orbits and swirls alongside the main avatar and
+// flows through space — a living "someone's on it" loader. Rendered by its own
+// tiny additive program so it never disturbs the face morph system.
+var MAXC = 4, CM = 64;                       // up to 4 clusters, 64 dots each
+var CLUSTER_A = [0.20, 0.85, 0.80];          // teal — the helpers
+var CLUSTER_B = [0.62, 0.52, 0.98];          // violet — kin to Luna
+var fadeC = [0, 0, 0, 0];                    // smoothed per-cluster presence
+var clustersOK = false, progC = null, vaoCluster = null, UC = {};
+
+(function initClusters() {
+  var CVS = "#version 300 es\n" +
+  "precision highp float;\n" +
+  "in float aSeed; in float aCluster;\n" +
+  "uniform float uTime, uAspect, uSize, uFade0, uFade1, uFade2, uFade3;\n" +
+  "out float vAlpha; out float vSeed;\n" +
+  "void main(){\n" +
+  "  float ci = aCluster;\n" +
+  "  float fade = ci < 0.5 ? uFade0 : ci < 1.5 ? uFade1 : ci < 2.5 ? uFade2 : uFade3;\n" +
+  "  float phase = ci * 2.399963;\n" +                      // golden-angle spacing
+  "  float t = uTime * 0.55 + phase;\n" +
+  "  float R = 1.34;\n" +
+  "  vec3 center = vec3(cos(t) * R, sin(t * 0.9) * 0.42 + 0.05, sin(t) * R * 0.55);\n" +
+  "  float a = aSeed * 6.2831853;\n" +
+  "  float rad = 0.11 * (0.35 + fract(aSeed * 7.7));\n" +
+  "  float sw = uTime * 2.2 + aSeed * 30.0;\n" +            // internal swirl
+  "  vec3 off = vec3(cos(a + sw), sin(a * 1.7 + sw), cos(a * 2.3 + sw * 0.5)) * rad;\n" +
+  "  vec3 p = center + off;\n" +
+  "  float z = p.z + 2.3, f = 1.9;\n" +
+  "  gl_Position = vec4(p.x * f / z / uAspect, p.y * f / z, 0.0, 1.0);\n" +
+  "  gl_PointSize = uSize * (0.55 + 0.6 * fract(aSeed * 5.3)) * (2.3 / z) * (0.5 + 0.9 * fade);\n" +
+  "  vAlpha = fade; vSeed = aSeed;\n" +
+  "}\n";
+  var CFS = "#version 300 es\n" +
+  "precision highp float;\n" +
+  "in float vAlpha; in float vSeed;\n" +
+  "uniform vec3 uColorA, uColorB;\n" +
+  "out vec4 frag;\n" +
+  "void main(){\n" +
+  "  float d = length(gl_PointCoord - 0.5);\n" +
+  "  float al = smoothstep(0.5, 0.06, d) * 0.55 * vAlpha;\n" +
+  "  vec3 c = mix(uColorA, uColorB, fract(vSeed * 3.77));\n" +
+  "  frag = vec4(c * al, al);\n" +
+  "}\n";
+  try {
+    progC = gl.createProgram();
+    gl.attachShader(progC, shader(gl.VERTEX_SHADER, CVS));
+    gl.attachShader(progC, shader(gl.FRAGMENT_SHADER, CFS));
+    gl.linkProgram(progC);
+    if (!gl.getProgramParameter(progC, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(progC));
+    ["uTime", "uAspect", "uSize", "uFade0", "uFade1", "uFade2", "uFade3", "uColorA", "uColorB"]
+      .forEach(function (n) { UC[n] = gl.getUniformLocation(progC, n); });
+    var cSeed = new Float32Array(MAXC * CM), cIdx = new Float32Array(MAXC * CM);
+    for (var i = 0; i < MAXC * CM; i++) { cSeed[i] = Math.random(); cIdx[i] = Math.floor(i / CM); }
+    vaoCluster = gl.createVertexArray();
+    gl.bindVertexArray(vaoCluster);
+    var lS = gl.getAttribLocation(progC, "aSeed");
+    var lC = gl.getAttribLocation(progC, "aCluster");
+    var bS = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, bS); gl.bufferData(gl.ARRAY_BUFFER, cSeed, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(lS); gl.vertexAttribPointer(lS, 1, gl.FLOAT, false, 0, 0);
+    var bC = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, bC); gl.bufferData(gl.ARRAY_BUFFER, cIdx, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(lC); gl.vertexAttribPointer(lC, 1, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    gl.useProgram(prog);   // restore the main program as current
+    clustersOK = true;
+  } catch (e) {
+    console.warn("subagent clusters unavailable: " + e.message);
+    clustersOK = false;
+  }
+})();
+
 var morphStart = -1e9;
 function easeInOut(t) { return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2; }
 function morphT(now) { return easeInOut(Math.min(1, (now - morphStart) / MORPH_MS)); }
@@ -512,9 +586,11 @@ try { viz = new BroadcastChannel("plugin-voice-viz"); } catch (e) {}
 
 var remoteAudio = document.getElementById("remote");
 var ownCall = null;                 // LunaRT handle when the PANE owns the session
+var startingOwn = false;            // guards the pane's own connect window
 var remoteLive = false;             // a widget-owned session is running
 var lastFeedAt = 0;
 var muted = false;
+var subagentCount = 0;              // luna_do tasks working → floating dot clusters
 var userLevel = 0, lunaLevel = 0;   // smoothed render inputs
 var feedUser = 0, feedLuna = 0;     // raw values from the feed
 
@@ -559,6 +635,7 @@ if (viz) viz.onmessage = function (e) {
       setState(m.state);
       feedUser = m.userLevel || 0;
       feedLuna = m.lunaLevel || 0;
+      subagentCount = m.agents || 0;
       if (m.muted !== muted) reflectMuted(!!m.muted);
       syncButtons();
     }
@@ -568,8 +645,8 @@ if (viz) viz.onmessage = function (e) {
     lastFeedAt = performance.now();
     remoteLive = !!m.live;
     syncButtons();
-  } else if (m.cmd === "ping" && ownCall) {
-    viz.postMessage({ type: "pong", owner: "view", live: true });
+  } else if (m.cmd === "ping" && (ownCall || startingOwn)) {
+    viz.postMessage({ type: "pong", owner: "view", live: !!ownCall || startingOwn });
   } else if (m.cmd === "end" && ownCall) {
     endOwn();
   } else if (m.cmd === "mute" && ownCall) {
@@ -615,8 +692,12 @@ function applyOwnMute(on) {
 }
 
 async function startOwn() {
-  if (ownCall) return;
+  // Synchronous latch over the ~2s connect await — without it a second trigger
+  // (double-tap, widget race) starts a competing OpenAI session that repeats
+  // every answer from scratch.
+  if (ownCall || startingOwn) return;
   if (!window.LunaRT) { flashHint("Voice engine failed to load", true); return; }
+  startingOwn = true;
   setState("connecting");
   syncButtons0(true);
   try {
@@ -629,12 +710,14 @@ async function startOwn() {
         react(shape);
         if (viz) viz.postMessage({ type: "react", shape: shape });
       },
+      onTask: function (n) { subagentCount = n; },
       onRemoteStream: function (stream) {
         remoteAudio.srcObject = stream;
         lunaAnalyser = makeAnalyser(stream);
       },
       onEnd: function (reason) {
         ownCall = null;
+        subagentCount = 0;
         micAnalyser = null; lunaAnalyser = null;
         if (reason) { setState("error"); flashHint(reason, true, 8000); }
         else setState("idle");
@@ -650,6 +733,8 @@ async function startOwn() {
     setState("error");
     flashHint(String(err && err.message || err), true, 8000);
     syncButtons();
+  } finally {
+    startingOwn = false;
   }
 }
 function syncButtons0(live) {   // optimistic while connecting
@@ -819,6 +904,32 @@ function frame(now) {
   gl.uniform3fv(U.uColorA, colA);
   gl.uniform3fv(U.uColorB, colB);
   gl.drawArrays(gl.POINTS, 0, DRAW_N);
+
+  // subagent clusters: ease each toward present (i < subagentCount) or gone,
+  // then draw the lit ones as a second additive pass. REDUCED motion still
+  // shows them (as a static glow) so the "working" cue isn't lost.
+  var want = Math.min(MAXC, subagentCount | 0);
+  var anyC = 0;
+  for (var ci = 0; ci < MAXC; ci++) {
+    fadeC[ci] += ((ci < want ? 1 : 0) - fadeC[ci]) * 0.08;
+    anyC += fadeC[ci];
+  }
+  if (clustersOK && anyC > 0.01) {
+    gl.useProgram(progC);
+    gl.bindVertexArray(vaoCluster);
+    gl.uniform1f(UC.uTime, REDUCED ? 0.6 : now * 0.001);
+    gl.uniform1f(UC.uAspect, innerWidth / innerHeight);
+    gl.uniform1f(UC.uSize, Math.max(2.2, innerHeight / 340) * dpr);
+    gl.uniform1f(UC.uFade0, fadeC[0]);
+    gl.uniform1f(UC.uFade1, fadeC[1]);
+    gl.uniform1f(UC.uFade2, fadeC[2]);
+    gl.uniform1f(UC.uFade3, fadeC[3]);
+    gl.uniform3fv(UC.uColorA, CLUSTER_A);
+    gl.uniform3fv(UC.uColorB, CLUSTER_B);
+    gl.drawArrays(gl.POINTS, 0, MAXC * CM);
+    gl.bindVertexArray(null);
+    gl.useProgram(prog);   // restore for the next frame's main pass
+  }
 }
 
 document.addEventListener("visibilitychange", function () {

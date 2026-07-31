@@ -157,6 +157,7 @@ async def do_connect(ctx: Any, *, pasted_key: str | None = None) -> dict:
         "persona_name": persona.get("name"),
         "greeting": persona.get("greeting"),
         "fillers": persona.get("fillers"),
+        "persona_brief": persona.get("persona_brief"),
         "rt_voice": voice,
     })
     await save_settings(ctx, settings)
@@ -180,6 +181,7 @@ async def resync_persona(ctx: Any) -> dict:
         "persona_name": persona.get("name") or await identity.live_name(ctx),
         "greeting": persona.get("greeting"),
         "fillers": persona.get("fillers"),
+        "persona_brief": persona.get("persona_brief"),
     })
     if voice:
         settings["rt_voice"] = voice

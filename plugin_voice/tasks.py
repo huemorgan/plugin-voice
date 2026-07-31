@@ -21,6 +21,22 @@ from typing import Any
 
 log = logging.getLogger("plugin-voice.tasks")
 
+
+def effective_policy(tool_def: Any) -> str | None:
+    """A tool's real policy, resolving the legacy ``gated=True`` flag.
+
+    A tool left at default ``policy="auto_approve"`` but marked ``gated``
+    resolves to ``prompt_always``; reading the raw ``.policy`` field would
+    mis-classify it as safe and over-expose it to the voice.
+    """
+    fn = getattr(tool_def, "effective_policy", None)
+    if callable(fn):
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001 — fall back to the raw field
+            pass
+    return getattr(tool_def, "policy", None)
+
 # Tools a task turn must NOT get, by name. run_turn does not enforce approval
 # policy — the def-level rules in voice_tool_allowlist are the real gate.
 # send_chat_message is deliberately ALLOWED: the spoken summary is the reply,
@@ -64,7 +80,7 @@ def voice_tool_allowlist(ctx: Any, *, owner_verified: bool = True) -> list[str] 
             continue
         if getattr(tool_def, "risk_level", None) == "high":
             continue
-        if getattr(tool_def, "policy", None) == "prompt_always" and not owner_verified:
+        if effective_policy(tool_def) == "prompt_always" and not owner_verified:
             continue
         allowed.append(name)
     return allowed or None
@@ -213,6 +229,7 @@ class TaskManager:
         *,
         owner_verified: bool,
         settings: dict,
+        conversation_id: Any | None = None,
     ) -> dict[str, Any]:
         instruction = (instruction or "").strip()
         if not instruction:
@@ -229,6 +246,9 @@ class TaskManager:
             # owner_verified is stamped AT DISPATCH TIME — the tool gate must
             # reflect who asked, not who happens to speak when the task ends.
             "owner_verified": owner_verified,
+            # Bind the delegated turn to the owner's chat so send_chat_message
+            # and approval cards resolve there (voice calls have no window).
+            "conversation_id": conversation_id,
         }
         self._entries[task_id] = entry
         entry["task"] = asyncio.get_running_loop().create_task(
@@ -250,7 +270,14 @@ class TaskManager:
         )
         tools = voice_tool_allowlist(ctx, owner_verified=entry["owner_verified"])
         try:
-            result = await ctx.agent.run_turn(prompt, tools=tools)
+            result = await ctx.agent.run_turn(
+                prompt,
+                tools=tools,
+                # Bound conversation → send_chat_message + approval cards land in
+                # the owner's chat (008.993 facade contract). None = unbound
+                # (older cores / no conversation) degrades to prior behavior.
+                conversation_id=entry.get("conversation_id"),
+            )
             entry["spoken_summary"] = normalize_reply(result)
             entry["status"] = "done"
             entry["finished"] = time.time()

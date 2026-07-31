@@ -28,6 +28,7 @@
     var onRemoteStream = opts.onRemoteStream || function () {};
     var onEnd = opts.onEnd || function () {};       // (reason: string|null) — null = clean
     var onReact = opts.onReact || function () {};   // Luna View reaction shape
+    var onTask = opts.onTask || function () {};     // (activeCount, event) — subagent loader
     var setStatus = opts.onStatus || function () {};
 
     var session = null, pc = null, dc = null, micStream = null;
@@ -192,7 +193,10 @@
             output: JSON.stringify({ ok: true }),
           },
         });
-        send({ type: "response.create" });
+        // No response.create here: the reaction is UI-only ("never announce it")
+        // and forcing a new response makes the talker take a second, redundant
+        // spoken turn for the same beat. The tool output is submitted so the
+        // model knows it landed; it keeps speaking its current turn as normal.
         return;
       }
       onState("thinking");
@@ -224,6 +228,18 @@
     // to announce them; a nudge never lands mid-utterance (queued, flushed on
     // speech_stopped + a beat).
     var lastSeq = 0;
+    var activeTasks = {};   // task_id → true while a subagent is working
+
+    // Track how many delegated (luna_do) tasks are in flight and surface the
+    // count so the Luna View can float a cluster of dots per working subagent.
+    function noteTask(e2) {
+      if (e2.type === "task_started") { activeTasks[e2.task_id] = true; }
+      else if (e2.type === "task_done" || e2.type === "task_failed") { delete activeTasks[e2.task_id]; }
+      else { return; }
+      var n = 0;
+      for (var k in activeTasks) { if (activeTasks.hasOwnProperty(k)) { n++; } }
+      onTask(n, e2);
+    }
 
     function startTaskEvents() {
       try {
@@ -236,6 +252,7 @@
         var e2;
         try { e2 = JSON.parse(ev.data); } catch (err) { return; }
         if (typeof e2.seq === "number") { lastSeq = e2.seq; }
+        noteTask(e2);
         pendingNudges.push(e2);
         scheduleFlush();
       };
