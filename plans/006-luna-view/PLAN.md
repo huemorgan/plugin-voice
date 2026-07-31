@@ -121,6 +121,15 @@ In `mock/index.html`: remove shape chips, add auto choreography + transient stat
 > module-level, not inline in the nav JSX. Head-model licensing resolved: Face Cap demo
 > head (three.js examples), attribution added to README + manifest description.
 
+> **0.6.1 hotfix:** the Phase 4 perf governor degraded permanently ("never recovers upward")
+> and its per-frame `dt > 22ms` trigger also fired on iframe rAF throttling and call-setup
+> jank — one bad stretch left the avatar at half resolution / quarter points for the rest of
+> the session ("weird super strong dots", owner-reported vs the mock). v2: visibility-gated,
+> 5s warm-up, ~3s of sustained struggle to step down, point floor raised 6k → 12k, and —
+> the actual cure — steps back up after ~10s of healthy frames. Verified by injecting a
+> synthetic main-thread load: degrades under load, returns to 24k points @ dpr 2 within
+> ~15s of the load clearing.
+
 ### Phase 4 — Polish
 
 - Connect/disconnect choreography (assemble/disperse), error = brief red shiver.
