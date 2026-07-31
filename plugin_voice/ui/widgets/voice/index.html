@@ -155,6 +155,7 @@
   }
 
   function pushVolumes() {
+    if (remoteViewAt) { return; }   // pane-owned call: the feed drives the waves
     userHist.push(level(micAnalyser)); userHist.shift();
     lunaHist.push(level(lunaAnalyser)); lunaHist.shift();
   }
@@ -215,11 +216,15 @@
   }
 
   // ---------------------------------------------------------------- session →
+  var starting = false;      // connect in flight — `call` not assigned yet
+  var cancelStart = false;   // End arrived mid-connect: tear down on resolve
+
   async function start() {
-    if (call) { return; }
+    if (call || starting) { return; }
     if (!window.LunaRT) {
       setLive(true); setMode("error"); setStatus("Voice engine failed to load", true); return;
     }
+    starting = true; cancelStart = false;
     setLive(true); setMode("connecting");
     try {
       call = await LunaRT.start({
@@ -245,6 +250,8 @@
           broadcastViz(true);
         },
       });
+      starting = false;
+      if (cancelStart) { cancelStart = false; call.end(); return; }
       micAnalyser = makeAnalyser(call.micStream);
       if (call.session.persona_name) { agentName = call.session.persona_name; }
       // persona_name is a mint-time snapshot — the identity plugin is the
@@ -258,13 +265,26 @@
       } catch (e) { /* best-effort; persona_name stands */ }
     } catch (err) {
       call = null;
+      starting = false;
+      if (cancelStart) {  // user already asked to end — no error flash
+        cancelStart = false;
+        setMode("idle"); setLive(false); setStatus("");
+        broadcastViz(true);
+        return;
+      }
       setMode("error"); setStatus(String(err.message || err), true);
     }
   }
 
   function stop() {
     if (call) { call.end(); }   // onEnd resets the UI
-    else { setMode("idle"); setLive(false); setStatus(""); }
+    else if (starting) {        // mid-connect: cancel as soon as it resolves
+      cancelStart = true;
+      setMode("idle"); setLive(false); setStatus("");
+      broadcastViz(true);
+    } else if (remoteViewAt) {  // pane-owned session: command it to end
+      if (viz) { viz.postMessage({ cmd: "end" }); }
+    } else { setMode("idle"); setLive(false); setStatus(""); }
   }
 
   try {
@@ -283,6 +303,7 @@
   var viz = null;
   try { viz = new BroadcastChannel("plugin-voice-viz"); } catch (e) {}
   var lastViz = 0;
+  var remoteViewAt = 0;   // last live pane-owned (owner:"view") feed timestamp
 
   function setMuted(on) {
     muted = !!on;
@@ -291,6 +312,7 @@
 
   function broadcastViz(force) {
     if (!viz) { return; }
+    if (remoteViewAt) { return; }   // the pane owns the feed — don't contend
     var now = performance.now();
     if (!force && now - lastViz < 33) { return; }
     lastViz = now;
@@ -303,18 +325,46 @@
   if (viz) {
     viz.onmessage = function (e) {
       var m = e.data;
-      if (!m || !m.cmd) { return; }
+      if (!m) { return; }
+      // mirror a pane-owned session so both surfaces stay in step
+      if (m.type === "viz" && m.owner === "view") {
+        var live = m.state !== "idle" && m.state !== "error";
+        if (live) {
+          remoteViewAt = performance.now();
+          if (!call && !starting) {
+            if (mode !== m.state) {
+              setMode(m.state);
+              if (m.state === "connecting") { setStatus("Connecting…"); }
+            }
+            setLive(true);
+            userHist.push(m.userLevel || 0); userHist.shift();
+            lunaHist.push(m.lunaLevel || 0); lunaHist.shift();
+          }
+        } else if (remoteViewAt) {
+          remoteViewAt = 0;
+          if (!call && !starting) { setMode("idle"); setLive(false); setStatus(""); }
+        }
+        return;
+      }
+      if (!m.cmd) { return; }
       if (m.cmd === "ping") {
-        viz.postMessage({ type: "pong", owner: "widget", live: !!call });
-      } else if (m.cmd === "start" && !call) {
+        viz.postMessage({ type: "pong", owner: "widget", live: !!call || starting });
+      } else if (m.cmd === "start" && !call && !starting) {
         start();
-      } else if (m.cmd === "end" && call) {
+      } else if (m.cmd === "end" && (call || starting)) {
         stop();
       } else if (m.cmd === "mute" && call) {
         setMuted(!!m.on);
         broadcastViz(true);
       }
     };
+    // a closed pane tab must not freeze the widget in a phantom call
+    setInterval(function () {
+      if (remoteViewAt && performance.now() - remoteViewAt > 2500) {
+        remoteViewAt = 0;
+        if (!call && !starting) { setMode("idle"); setLive(false); setStatus(""); }
+      }
+    }, 1000);
   }
 
   // expand to Luna View — luna-navigate (core 062) routes through the same
@@ -326,8 +376,8 @@
   });
 
   endBtn.addEventListener("click", stop);
-  cta.addEventListener("click", start);
-  canvas.addEventListener("click", function () { if (!call) start(); });
+  cta.addEventListener("click", function () { if (!remoteViewAt) { start(); } });
+  canvas.addEventListener("click", function () { if (!call && !remoteViewAt) { start(); } });
 
   sizeCanvas();
   requestAnimationFrame(draw);

@@ -512,6 +512,8 @@ try { viz = new BroadcastChannel("plugin-voice-viz"); } catch (e) {}
 
 var remoteAudio = document.getElementById("remote");
 var ownCall = null;                 // LunaRT handle when the PANE owns the session
+var startingOwn = false;            // own connect in flight — ownCall not set yet
+var cancelOwn = false;              // End arrived mid-connect: tear down on resolve
 var remoteLive = false;             // a widget-owned session is running
 var lastFeedAt = 0;
 var muted = false;
@@ -555,7 +557,7 @@ if (viz) viz.onmessage = function (e) {
   if (m.type === "viz") {
     lastFeedAt = performance.now();
     remoteLive = m.state !== "idle" && m.state !== "error";
-    if (!ownCall) {
+    if (!ownCall && !startingOwn) {
       setState(m.state);
       feedUser = m.userLevel || 0;
       feedLuna = m.lunaLevel || 0;
@@ -568,9 +570,9 @@ if (viz) viz.onmessage = function (e) {
     lastFeedAt = performance.now();
     remoteLive = !!m.live;
     syncButtons();
-  } else if (m.cmd === "ping" && ownCall) {
+  } else if (m.cmd === "ping" && (ownCall || startingOwn)) {
     viz.postMessage({ type: "pong", owner: "view", live: true });
-  } else if (m.cmd === "end" && ownCall) {
+  } else if (m.cmd === "end" && (ownCall || startingOwn)) {
     endOwn();
   } else if (m.cmd === "mute" && ownCall) {
     applyOwnMute(!!m.on);
@@ -593,7 +595,7 @@ var btnMute = document.getElementById("btnMute");
 var muteLabel = document.getElementById("muteLabel");
 var btnMicSetup = document.getElementById("btnMicSetup");
 
-function inCall() { return !!ownCall || remoteLive; }
+function inCall() { return !!ownCall || startingOwn || remoteLive; }
 
 function syncButtons() {
   var live = inCall();
@@ -615,8 +617,9 @@ function applyOwnMute(on) {
 }
 
 async function startOwn() {
-  if (ownCall) return;
+  if (ownCall || startingOwn) return;
   if (!window.LunaRT) { flashHint("Voice engine failed to load", true); return; }
+  startingOwn = true; cancelOwn = false;
   setState("connecting");
   syncButtons0(true);
   try {
@@ -643,10 +646,19 @@ async function startOwn() {
         broadcastFeed(true);
       },
     });
+    startingOwn = false;
+    if (cancelOwn) { cancelOwn = false; ownCall.end(); return; }
     micAnalyser = makeAnalyser(ownCall.micStream);
     syncButtons();
   } catch (err) {
     ownCall = null;
+    startingOwn = false;
+    if (cancelOwn) {  // user already asked to end — no error flash
+      cancelOwn = false;
+      setState("idle");
+      syncButtons();
+      return;
+    }
     setState("error");
     flashHint(String(err && err.message || err), true, 8000);
     syncButtons();
@@ -661,12 +673,19 @@ function syncButtons0(live) {   // optimistic while connecting
 
 function endOwn() {
   if (ownCall) ownCall.end();
+  else if (startingOwn) {  // mid-connect: cancel as soon as it resolves
+    cancelOwn = true;
+    setState("idle");
+    syncButtons();
+  }
 }
 
 btnTalk.addEventListener("click", function () {
-  if (ownCall) { endOwn(); return; }
+  if (ownCall || startingOwn) { endOwn(); return; }
   if (remoteLive) { if (viz) viz.postMessage({ cmd: "end" }); return; }
-  // no live owner — ask the widget first; if nobody answers, own the session
+  // no live owner — hand the session to the widget if one is present (single
+  // owner, single broadcaster); own it only when nobody answers the ping
+  // (pane opened standalone, no widget mounted)
   var answered = false;
   if (viz) {
     var onPong = function (e) {
@@ -676,7 +695,14 @@ btnTalk.addEventListener("click", function () {
     viz.postMessage({ cmd: "ping" });
     setTimeout(function () {
       viz.removeEventListener("message", onPong);
-      if (answered && remoteLive) return;    // someone owns a live call after all
+      if (answered) {
+        if (!remoteLive) {              // widget present but idle — start it
+          viz.postMessage({ cmd: "start" });
+          setState("connecting");       // optimistic; its feed corrects us
+          syncButtons0(true);
+        }
+        return;                         // live already: feed keeps us in step
+      }
       startOwn();
     }, 300);
   } else {
