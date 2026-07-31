@@ -90,6 +90,50 @@ def test_widget_index_wires_rt_client_not_elevenlabs(client):
     assert "elevenlabs-client.js" not in resp.text
 
 
+# --------------------------------------------------------- 006 — Luna View
+
+
+def test_view_pane_served_at_view_path(client):
+    resp = client.get("/api/p/plugin-voice/ui/view/")
+    assert resp.status_code == 200
+    assert "Luna view" in resp.text
+
+
+def test_view_pane_served_at_pane_root(client):
+    """Today's shell hardcodes plugin pane iframes to /api/p/<plugin>/ui/ —
+    the catch-all must serve Luna View there so the sidebar link works on
+    cores that don't know SidebarSection.path yet."""
+    resp = client.get("/api/p/plugin-voice/ui/")
+    assert resp.status_code == 200
+    assert "Luna view" in resp.text
+    # head.bin resolves relative to the pane root too
+    assert client.get("/api/p/plugin-voice/ui/head.bin").status_code == 200
+
+
+def test_pane_root_does_not_shadow_widget_and_settings(client):
+    """The /ui/{path} catch-all is registered LAST — the specific widget and
+    settings routes must still win."""
+    assert "LunaRT" in client.get("/api/p/plugin-voice/ui/widgets/voice/rt-client.js").text
+    assert client.get("/api/p/plugin-voice/ui/settings/").status_code == 200
+
+
+def test_rt_session_advertises_luna_view_react(rt):
+    data = rt.get("/api/p/plugin-voice/rt/session").json()
+    assert "luna_view_react" in data["tool_names"]
+
+
+def test_rt_tool_luna_view_react_is_a_quiet_noop(rt):
+    """Normally intercepted client-side; an old cached rt-client that relays
+    it must get a clean ok, not an unknown-tool error."""
+    token = rt.get("/api/p/plugin-voice/rt/session").json()["rt_token"]
+    resp = rt.post(
+        "/api/p/plugin-voice/rt/tool",
+        json={"token": token, "name": "luna_view_react", "arguments": {"shape": "heart"}},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+
 def test_js_field_list_matches_client_source():
     """The JS_CONSUMED_FIELDS set above is hand-maintained — verify each field
     actually appears as a session.<field> read in the client source, so the

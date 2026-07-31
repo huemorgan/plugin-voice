@@ -22,7 +22,7 @@ def _manifest():
 def test_toml_and_manifest_agree():
     toml, manifest = _toml(), _manifest()
     assert toml["name"] == manifest.name == "plugin-voice"
-    assert toml["version"] == manifest.version == "0.5.2"
+    assert toml["version"] == manifest.version == "0.6.0"
     assert toml["entry"] == "plugin_voice"
     assert toml["description"] == manifest.description
 
@@ -70,6 +70,35 @@ def test_widget_files_shipped():
     assert not (widget_dir / "elevenlabs-client.js").exists()
     assert (PKG / "ui" / "settings" / "index.html").is_file()
     assert (PKG / "ui" / "settings" / "persona" / "index.html").is_file()
+
+
+def test_luna_view_section_declared():
+    """006: the Luna View pane is a hidden sidebar section (dict — the SDK
+    doesn't re-export SidebarSection; pydantic validates dicts fine and old
+    cores that lack `hidden`/`path` fields simply ignore them)."""
+    sections = _manifest().sidebar_sections
+    assert len(sections) == 1
+    s = sections[0]
+    get = s.get if isinstance(s, dict) else lambda k, d=None: getattr(s, k, d)
+    assert get("id") == "luna-view"
+    assert get("label")
+    assert get("path") == "ui/view/"
+    assert get("hidden") is True
+
+
+def test_view_files_shipped():
+    """006: the Luna View pane's static files exist inside the package."""
+    view_dir = PKG / "ui" / "view"
+    assert (view_dir / "index.html").is_file()
+    # The 24k-point head model the avatar morphs to (float32 layout, N*7 values).
+    assert (view_dir / "head.bin").stat().st_size == 24000 * 7 * 4
+
+
+def test_view_uses_shared_rt_client():
+    """006: the pane must reuse the widget's rt-client.js, not carry a copy."""
+    html = (PKG / "ui" / "view" / "index.html").read_text(encoding="utf-8")
+    assert '/api/p/plugin-voice/ui/widgets/voice/rt-client.js' in html
+    assert not (PKG / "ui" / "view" / "rt-client.js").exists()
 
 
 def test_no_luna_core_imports():

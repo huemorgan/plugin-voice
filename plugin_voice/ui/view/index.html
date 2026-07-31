@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Luna View</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #11151f;
+    --line: #232a3a;
+    --text: #e6e9f2;
+    --dim: #8b93a7;
+    --faint: #5b6275;
+    --violet: #8b5cf6;
+    --violet-soft: #a78bfa;
+    --user: #2dd4bf;
+    --err: #f87171;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.4 "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #glow {
+    position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse 60% 50% at 50% 46%, rgba(139,92,246,.10), rgba(94,174,252,.04) 55%, transparent 75%);
+  }
+  #gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  #hud { position: absolute; top: 24px; left: 28px; pointer-events: none; }
+  #hud .eyebrow {
+    font-size: 11px; font-weight: 600; letter-spacing: .17em;
+    text-transform: uppercase; color: var(--violet-soft);
+  }
+  /* transient state label — fades in on every change, then out. Full duplex
+     flips states fast; the text is an annotation, not a fixture. */
+  #stateLabel {
+    font-size: 21px; font-weight: 700; margin-top: 6px;
+    opacity: 0; transition: opacity .15s ease-in;
+  }
+  #stateLabel.show { opacity: 1; }
+  #stateLabel.hide { opacity: 0; transition: opacity .5s ease-out; }
+  #hint { font-size: 13px; color: var(--dim); margin-top: 4px; opacity: 0; transition: opacity .4s; }
+  #hint.show { opacity: 1; }
+  #hint.error { color: var(--err); }
+
+  #fps {
+    position: absolute; top: 26px; right: 28px;
+    font-size: 11px; color: var(--faint); letter-spacing: .08em;
+    display: none;
+  }
+
+  #bar {
+    position: absolute; left: 0; right: 0; bottom: 24px;
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+  }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center; max-width: 720px; }
+  .row .lbl {
+    font-size: 10px; font-weight: 600; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--faint); width: 62px; text-align: right;
+  }
+  .chip {
+    border: 1px solid var(--line); border-radius: 999px; background: transparent;
+    color: var(--dim); font: 600 12px/1 "Inter", system-ui, sans-serif;
+    padding: 7px 14px; cursor: pointer; letter-spacing: .02em;
+  }
+  .chip:hover { color: var(--text); }
+  .debug-row { display: none; }
+  body.debug .debug-row { display: flex; }
+  body.debug #fps { display: block; }
+
+  #controls { display: flex; align-items: center; gap: 10px; }
+  .btn {
+    border: 1px solid var(--line); border-radius: 999px; background: rgba(17,21,31,.7);
+    color: var(--text); font: 600 13px/1 "Inter", system-ui, sans-serif;
+    padding: 11px 20px; cursor: pointer; letter-spacing: .02em;
+    display: inline-flex; align-items: center; gap: 8px;
+    backdrop-filter: blur(6px);
+  }
+  .btn:hover { border-color: var(--violet-soft); }
+  .btn.primary { background: var(--violet); border-color: var(--violet); }
+  .btn.primary:hover { background: var(--violet-soft); border-color: var(--violet-soft); }
+  .btn.danger { border-color: #7f1d1d; color: #fca5a5; }
+  .btn.muted-on { border-color: var(--user); color: var(--user); }
+  .btn[hidden] { display: none; }
+  .btn svg { width: 14px; height: 14px; }
+
+  #err {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    color: var(--dim); font-size: 14px;
+  }
+</style>
+</head>
+<body>
+<div id="glow"></div>
+<canvas id="gl"></canvas>
+<div id="hud">
+  <div class="eyebrow">Luna view</div>
+  <div id="stateLabel" data-testid="view-state"></div>
+  <div id="hint" data-testid="view-hint"></div>
+</div>
+<div id="fps"></div>
+<div id="err">This view needs WebGL2, which this browser doesn't offer — the Voice widget in the sidebar still works for talking.</div>
+<div id="bar">
+  <div class="row debug-row" id="reactions">
+    <span class="lbl">React</span>
+    <button class="chip" data-v="heart">Heart</button>
+    <button class="chip" data-v="thumb">Thumbs up</button>
+    <button class="chip" data-v="rocket">Rocket</button>
+    <button class="chip" data-v="arm">Strong arm</button>
+    <button class="chip" data-v="fireworks">Fireworks</button>
+  </div>
+  <div id="controls">
+    <button class="btn" id="btnMicSetup" data-testid="view-mic-setup" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="18" x2="12" y2="22"/></svg>
+      Set up microphone
+    </button>
+    <button class="btn primary" id="btnTalk" data-testid="view-talk">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/></svg>
+      <span id="talkLabel">Talk</span>
+    </button>
+    <button class="btn" id="btnMute" data-testid="view-mute" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><line x1="3" y1="3" x2="21" y2="21"/></svg>
+      <span id="muteLabel">Mute</span>
+    </button>
+  </div>
+</div>
+<audio id="remote" autoplay style="display:none"></audio>
+<script src="/api/p/plugin-voice/ui/widgets/voice/rt-client.js"></script>
+<script>
+(function () {
+"use strict";
+
+var API = "/api/p/plugin-voice";
+var N = 24000;               // points
+var MORPH_MS = 1800;
+var DEBUG = /[?&]debug=1/.test(location.search);
+if (DEBUG) document.body.classList.add("debug");
+
+// ------------------------------------------------------------------- WebGL →
+var canvas = document.getElementById("gl");
+var gl = canvas.getContext("webgl2", { antialias: false, alpha: true, depth: false });
+if (!gl) { document.getElementById("err").style.display = "flex"; return; }
+
+var VS = "#version 300 es\n" +
+"precision highp float;\n" +
+"in vec4 aFrom; in vec4 aTo; in vec3 aJaw; in float aSeed;\n" +
+"uniform float uMorph, uTime, uLevel, uMouth, uPulse, uAspect, uSize, uFw, uFwT;\n" +
+"uniform vec2 uMouse;\n" +
+"out float vSeed; out float vFade; out float vBright; out float vSpark; out float vFwGlow;\n" +
+"void main(){\n" +
+"  vec3 p = mix(aFrom.xyz, aTo.xyz, uMorph);\n" +
+"  vBright = mix(aFrom.w, aTo.w, uMorph);\n" +   // per-point glow (mesh detail on the face)
+"  float s = aSeed * 6.2831853;\n" +
+   // organic drift — silence is a calm shimmer, speech makes the flock tremble
+"  vec3 wob = vec3(sin(uTime*1.4 + s*3.1), cos(uTime*1.8 + s*5.7), sin(uTime*1.1 + s*9.3));\n" +
+"  p += wob * (0.007 + uLevel*0.022 + uPulse*0.028);\n" +
+   // articulation: the model's baked jawOpen blendshape, driven by the voice
+"  p += aJaw * (uMouth * uMorph);\n" +
+
+   // ── fireworks overlay ── a minority of points become sparks; the rest dim.
+   // 3 staggered bursts: rise from below → spherical shell explosion with
+   // gentle gravity droop and a sparkling fade. Procedural from aSeed.
+"  float spark = step(fract(aSeed*7.31), 0.125);\n" +           // ~3k of 24k points
+"  float bid = floor(fract(aSeed*3.917) * 3.0);\n" +            // burst 0..2
+"  float lt = uFwT - bid*0.34;\n" +                             // local burst time
+"  vec3 c0 = vec3((fract(bid*0.437+0.11)-0.5)*1.5, 0.12 + fract(bid*0.71)*0.50, (fract(bid*0.53)-0.5)*0.5);\n" +
+"  float rise = clamp(lt/0.40, 0.0, 1.0);\n" +
+"  rise = 1.0 - (1.0-rise)*(1.0-rise);\n" +                     // ease-out ascent
+"  float et = max(0.0, lt - 0.40);\n" +                         // explosion time
+"  float u2 = fract(aSeed*11.7)*2.0 - 1.0;\n" +
+"  float ang2 = fract(aSeed*17.3)*6.2831853;\n" +
+"  float rr = sqrt(max(0.0, 1.0 - u2*u2));\n" +
+"  vec3 dir = vec3(cos(ang2)*rr, u2, sin(ang2)*rr);\n" +
+"  float shell = (0.55 + 0.30*fract(bid*0.77)) * (0.80 + 0.4*fract(aSeed*23.9));\n" +
+"  float ex = 1.0 - exp(-2.8*et);\n" +
+"  vec3 fwPos = mix(vec3(c0.x, -1.20, c0.z), c0, rise) + dir * shell * ex;\n" +
+"  fwPos.y -= 0.16*et*et;\n" +                                  // gentle gravity droop
+"  float alive = step(0.0, lt) * (1.0 - smoothstep(0.9, 1.5, et));\n" +
+"  alive *= mix(1.0, 0.55 + 0.45*sin(uTime*22.0 + s*40.0), step(0.01, et));\n" + // twinkle
+"  float fwMix = uFw * spark;\n" +
+"  p = mix(p, fwPos, fwMix);\n" +
+"  vSpark = fwMix;\n" +
+"  vFwGlow = alive;\n" +
+
+   // gentle sway (never spins the face away) + mouse parallax — sparks stay world-still
+"  float ry = (sin(uTime*0.22)*0.18 + uMouse.x*0.35) * (1.0 - fwMix);\n" +
+"  float rx = uMouse.y*0.20 * (1.0 - fwMix);\n" +
+"  float cy = cos(ry), sy = sin(ry), cx = cos(rx), sx = sin(rx);\n" +
+"  p = vec3(p.x*cy + p.z*sy, p.y, -p.x*sy + p.z*cy);\n" +
+"  p = vec3(p.x, p.y*cx - p.z*sx, p.y*sx + p.z*cx);\n" +
+"  float z = p.z + 2.3;\n" +
+"  float f = 1.9;\n" +
+"  gl_Position = vec4(p.x*f/z/uAspect, p.y*f/z, 0.0, 1.0);\n" +
+"  gl_PointSize = uSize * (0.5 + 0.9*fract(aSeed*5.3)) * (1.0 + uLevel*0.7) * (1.0 + fwMix*1.4) * (2.3/z);\n" +
+"  vSeed = aSeed;\n" +
+"  vFade = smoothstep(3.05, 1.95, z);\n" +   // strong depth dimming ≈ occlusion
+"}\n";
+
+var FS = "#version 300 es\n" +
+"precision highp float;\n" +
+"in float vSeed; in float vFade; in float vBright; in float vSpark; in float vFwGlow;\n" +
+"uniform vec3 uColorA, uColorB;\n" +
+"uniform float uFw;\n" +
+"out vec4 frag;\n" +
+"void main(){\n" +
+"  float d = length(gl_PointCoord - 0.5);\n" +
+"  float a = smoothstep(0.5, 0.08, d) * 0.40 * vFade * vBright;\n" +
+"  vec3 c = mix(uColorA, uColorB, fract(vSeed*3.77));\n" +
+"  vec3 party = 0.58 + 0.42*cos(6.28318*(fract(vSeed*9.17) + vec3(0.0, 0.33, 0.67)));\n" +
+"  c = mix(c, party, vSpark);\n" +
+"  a *= mix(1.0 - uFw*0.82, vFwGlow * 2.6, vSpark);\n" +
+"  frag = vec4(c * a, a);\n" +      // additive glow
+"}\n";
+
+function shader(type, src) {
+  var sh = gl.createShader(type);
+  gl.shaderSource(sh, src); gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+  return sh;
+}
+var prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.ONE, gl.ONE);      // pure additive — dense areas glow
+
+var U = {};
+["uMorph","uTime","uLevel","uMouth","uPulse","uAspect","uSize","uMouse","uColorA","uColorB","uFw","uFwT"]
+  .forEach(function (n) { U[n] = gl.getUniformLocation(prog, n); });
+
+var seeds = new Float32Array(N);
+for (var i = 0; i < N; i++) seeds[i] = Math.random();
+
+function makeBuf(loc, data, size) {
+  var b = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, b);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+  return b;
+}
+
+// ------------------------------------------------------------ shape targets →
+function fromCanvas(draw, count, out, off, bright, thickness, scale) {
+  var S = 480;
+  var c = document.createElement("canvas"); c.width = c.height = S;
+  var g = c.getContext("2d");
+  g.fillStyle = g.strokeStyle = "#fff";
+  g.lineCap = g.lineJoin = "round";
+  draw(g, S);
+  var px = [], data = g.getImageData(0, 0, S, S).data;
+  for (var y = 0; y < S; y += 1) {
+    for (var x = 0; x < S; x += 1) {
+      if (data[(y * S + x) * 4 + 3] > 60) px.push(x, y);
+    }
+  }
+  var n = px.length / 2;
+  for (var i = 0; i < count; i++) {
+    var k = (Math.random() * n | 0) * 2;
+    var j = (off + i) * 4;
+    out[j]     = ((px[k]   + Math.random() - 0.5) / S - 0.5) * 2 * scale;
+    out[j + 1] = -(((px[k + 1] + Math.random() - 0.5) / S - 0.5) * 2) * scale;
+    out[j + 2] = (Math.random() - 0.5) * thickness;
+    out[j + 3] = bright;
+  }
+}
+
+function orbTarget() {
+  var out = new Float32Array(N * 4), GA = Math.PI * (3 - Math.sqrt(5));
+  for (var i = 0; i < N; i++) {
+    var t = i / N, ang = GA * i;
+    var y = 1 - 2 * t, r = Math.sqrt(Math.max(0, 1 - y * y));
+    out[i*4] = Math.cos(ang) * r * 0.85;
+    out[i*4+1] = y * 0.85;
+    out[i*4+2] = Math.sin(ang) * r * 0.85;
+    out[i*4+3] = 1;
+  }
+  return out;
+}
+
+// The face is a REAL scanned head with a baked jawOpen blendshape — see
+// plans/006-luna-view/assets/extract_head.mjs. head.bin layout:
+// [N*3 base xyz][N*3 jawOpen deltas][N brightness].
+var faceJaw = null;
+function loadHead() {
+  return fetch("head.bin").then(function (r) {
+    if (!r.ok) throw new Error("head.bin missing");
+    return r.arrayBuffer();
+  }).then(function (buf) {
+    var f = new Float32Array(buf);
+    if (f.length !== N * 7) throw new Error("head.bin layout mismatch");
+    var out = new Float32Array(N * 4);
+    for (var i = 0; i < N; i++) {
+      out[i*4] = f[i*3]; out[i*4+1] = f[i*3+1] + 0.05; out[i*4+2] = f[i*3+2];
+      out[i*4+3] = f[N * 6 + i];   // brightness = mesh detail (features glow)
+    }
+    faceJaw = f.slice(N * 3, N * 6);
+    targets.face = out;
+    if (baseShape() === "face") setShape("face", performance.now());
+  }).catch(function (e) {
+    console.warn("3D head unavailable (" + e.message + ") — Face falls back to Orb");
+    targets.face = orbTarget();
+  });
+}
+
+function swarmTarget() {
+  var out = new Float32Array(N * 4), P = 2, Q = 3, R = 0.62, r = 0.24;
+  for (var i = 0; i < N; i++) {
+    var t = Math.random() * Math.PI * 2;
+    var g1 = (Math.random() + Math.random() + Math.random() - 1.5) * 0.055;
+    var g2 = (Math.random() + Math.random() + Math.random() - 1.5) * 0.055;
+    var g3 = (Math.random() + Math.random() + Math.random() - 1.5) * 0.055;
+    var w = R + r * Math.cos(Q * t);
+    out[i*4]   = w * Math.cos(P * t) + g1;
+    out[i*4+1] = (w * Math.sin(P * t)) * 0.82 + g2;
+    out[i*4+2] = r * Math.sin(Q * t) + g3;
+    out[i*4+3] = 1;
+  }
+  return out;
+}
+
+function heartTarget() {
+  var out = new Float32Array(N * 4);
+  fromCanvas(function (g, S) {
+    g.beginPath();
+    g.moveTo(S*0.50, S*0.82);
+    g.bezierCurveTo(S*0.08, S*0.52, S*0.12, S*0.18, S*0.34, S*0.18);
+    g.bezierCurveTo(S*0.44, S*0.18, S*0.50, S*0.27, S*0.50, S*0.34);
+    g.bezierCurveTo(S*0.50, S*0.27, S*0.56, S*0.18, S*0.66, S*0.18);
+    g.bezierCurveTo(S*0.88, S*0.18, S*0.92, S*0.52, S*0.50, S*0.82);
+    g.fill();
+  }, N, out, 0, 1, 0.16, 1.05);
+  return out;
+}
+
+function thumbTarget() {
+  var out = new Float32Array(N * 4);
+  fromCanvas(function (g, S) {
+    g.beginPath(); g.roundRect(S*0.40, S*0.42, S*0.30, S*0.34, S*0.06); g.fill();  // fist
+    g.beginPath(); g.roundRect(S*0.27, S*0.46, S*0.11, S*0.28, S*0.04); g.fill();  // cuff
+    g.lineWidth = S * 0.12;                                                        // thumb up
+    g.beginPath(); g.moveTo(S*0.47, S*0.47); g.quadraticCurveTo(S*0.46, S*0.28, S*0.56, S*0.20); g.stroke();
+  }, N, out, 0, 1, 0.16, 1.1);
+  return out;
+}
+
+function rocketTarget() {
+  var out = new Float32Array(N * 4);
+  fromCanvas(function (g, S) {
+    g.beginPath(); g.ellipse(S*0.5, S*0.46, S*0.115, S*0.30, 0, 0, 7); g.fill();   // body
+    g.beginPath(); g.moveTo(S*0.5, S*0.07); g.lineTo(S*0.615, S*0.26);             // nose cone
+    g.lineTo(S*0.385, S*0.26); g.closePath(); g.fill();
+    g.beginPath(); g.moveTo(S*0.405, S*0.60); g.lineTo(S*0.26, S*0.84);            // fins
+    g.lineTo(S*0.43, S*0.75); g.closePath(); g.fill();
+    g.beginPath(); g.moveTo(S*0.595, S*0.60); g.lineTo(S*0.74, S*0.84);
+    g.lineTo(S*0.57, S*0.75); g.closePath(); g.fill();
+    g.beginPath(); g.moveTo(S*0.455, S*0.78); g.lineTo(S*0.5, S*0.94);             // flame
+    g.lineTo(S*0.545, S*0.78); g.closePath(); g.fill();
+    g.globalCompositeOperation = "destination-out";                                // window
+    g.beginPath(); g.arc(S*0.5, S*0.38, S*0.055, 0, 7); g.fill();
+    g.globalCompositeOperation = "source-over";
+  }, N, out, 0, 1, 0.16, 1.1);
+  return out;
+}
+
+function armTarget() {
+  var out = new Float32Array(N * 4);
+  fromCanvas(function (g, S) {
+    g.lineWidth = S * 0.15; g.lineCap = "round";
+    g.beginPath(); g.moveTo(S*0.76, S*0.74); g.lineTo(S*0.40, S*0.68);             // upper arm
+    g.lineTo(S*0.44, S*0.36); g.stroke();                                          // forearm
+    g.beginPath(); g.arc(S*0.585, S*0.585, S*0.14, 0, 7); g.fill();                // biceps bulge
+    g.beginPath(); g.arc(S*0.45, S*0.28, S*0.105, 0, 7); g.fill();                 // fist
+  }, N, out, 0, 1, 0.16, 1.1);
+  return out;
+}
+
+var targets = {
+  orb: orbTarget(), face: null, swarm: swarmTarget(),
+  heart: heartTarget(), thumb: thumbTarget(), rocket: rocketTarget(),
+  arm: armTarget()
+};
+loadHead();
+
+// ------------------------------------------------------------------ buffers →
+var fromArr = new Float32Array(targets.orb);
+var toArr = new Float32Array(targets.orb);
+var zeroJaw = new Float32Array(N * 3);
+var locFrom = gl.getAttribLocation(prog, "aFrom");
+var locTo = gl.getAttribLocation(prog, "aTo");
+var locJaw = gl.getAttribLocation(prog, "aJaw");
+var locSeed = gl.getAttribLocation(prog, "aSeed");
+var bufFrom = makeBuf(locFrom, fromArr, 4);
+var bufTo = makeBuf(locTo, toArr, 4);
+var bufJaw = makeBuf(locJaw, zeroJaw, 3);
+makeBuf(locSeed, seeds, 1);
+
+var morphStart = -1e9;
+function easeInOut(t) { return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2; }
+function morphT(now) { return easeInOut(Math.min(1, (now - morphStart) / MORPH_MS)); }
+
+var curShape = "orb";
+function setShape(name, now) {
+  if (!targets[name]) return;   // head.bin still loading
+  if (name === curShape) return;
+  curShape = name;
+  var t = morphT(now);
+  for (var i = 0; i < N * 4; i++) fromArr[i] = fromArr[i] + (toArr[i] - fromArr[i]) * t;
+  toArr.set(targets[name]);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufFrom); gl.bufferSubData(gl.ARRAY_BUFFER, 0, fromArr);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufTo);   gl.bufferSubData(gl.ARRAY_BUFFER, 0, toArr);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bufJaw);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, name === "face" && faceJaw ? faceJaw : zeroJaw);
+  // reduced motion: shapes cut, they don't fly
+  morphStart = REDUCED ? now - MORPH_MS : now;
+}
+
+// ------------------------------------------------------------- state/colors →
+var STATES = {
+  idle:      { a: [0.36, 0.31, 0.62], b: [0.24, 0.40, 0.68], label: "Idle" },
+  connecting:{ a: [0.44, 0.38, 0.80], b: [0.30, 0.45, 0.75], label: "Connecting…" },
+  listening: { a: [0.18, 0.83, 0.75], b: [0.22, 0.55, 0.80], label: "Listening" },
+  thinking:  { a: [0.44, 0.36, 0.82], b: [0.30, 0.30, 0.60], label: "Thinking…" },
+  speaking:  { a: [0.65, 0.55, 0.98], b: [0.86, 0.50, 0.88], label: "Speaking" },
+  error:     { a: [0.75, 0.30, 0.30], b: [0.55, 0.25, 0.35], label: "Something broke" }
+};
+var state = "idle";
+var colA = STATES.idle.a.slice(), colB = STATES.idle.b.slice();
+
+var labelEl = document.getElementById("stateLabel");
+var labelTimer = 0;
+function flashLabel(text) {
+  labelEl.textContent = text;
+  labelEl.classList.remove("hide");
+  labelEl.classList.add("show");
+  clearTimeout(labelTimer);
+  labelTimer = setTimeout(function () {
+    labelEl.classList.remove("show");
+    labelEl.classList.add("hide");
+  }, 1000);
+}
+var hintEl = document.getElementById("hint");
+var hintTimer = 0;
+function flashHint(text, isErr, ms) {
+  hintEl.textContent = text;
+  hintEl.classList.toggle("error", !!isErr);
+  hintEl.classList.add("show");
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(function () { hintEl.classList.remove("show"); }, ms || 4000);
+}
+
+var shiverUntil = 0;
+function setState(s) {
+  if (!STATES[s] || s === state) return;
+  var wasError = state === "error";
+  state = s;
+  flashLabel(STATES[s].label);
+  if (s === "error" && !wasError) shiverUntil = performance.now() + 700;
+  var want = baseShape();
+  if (!reacting()) setShape(want, performance.now());
+}
+
+// ---------------------------------------------------------------- fireworks →
+var fw = 0, fwOn = false, fwStart = 0, fwTimer = 0;
+var FW_SHOW_MS = 2700;
+function fireworks() {
+  fwOn = true;
+  fwStart = performance.now();
+  clearTimeout(fwTimer);
+  fwTimer = setTimeout(function () { fwOn = false; }, FW_SHOW_MS);
+}
+
+// ---------------------------------------------------------------- reactions →
+var reactTimer = 0, reactUntil = 0;
+function reacting() { return performance.now() < reactUntil; }
+// prefers-reduced-motion: a calm, near-static dim orb — no drift, no sway,
+// no voice trembling. Explicit reactions (user/Luna asked) still morph.
+var REDUCED = false;
+try { REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) {}
+function baseShape() {
+  if (REDUCED) return "orb";
+  if (state === "connecting") return "swarm";
+  if (state === "idle" || state === "error") return "orb";
+  return "face";
+}
+function react(name) {
+  if (name === "fireworks") { fireworks(); return; }
+  if (!targets[name]) return;
+  clearTimeout(reactTimer);
+  reactUntil = performance.now() + 3000;
+  setShape(name, performance.now());
+  reactTimer = setTimeout(function () {
+    reactUntil = 0;
+    setShape(baseShape(), performance.now());
+  }, 3000);
+}
+
+// ---------------------------------------------------------- session / feed →
+// The widget normally owns the WebRTC session and broadcasts a viz feed; this
+// pane renders it and sends commands back. If nobody owns a session, the pane
+// starts one itself (same rt-client) and becomes the feed owner.
+var viz = null;
+try { viz = new BroadcastChannel("plugin-voice-viz"); } catch (e) {}
+
+var remoteAudio = document.getElementById("remote");
+var ownCall = null;                 // LunaRT handle when the PANE owns the session
+var remoteLive = false;             // a widget-owned session is running
+var lastFeedAt = 0;
+var muted = false;
+var userLevel = 0, lunaLevel = 0;   // smoothed render inputs
+var feedUser = 0, feedLuna = 0;     // raw values from the feed
+
+// shell auth token (section iframes get it via luna-auth, same as widgets)
+var token = new URLSearchParams(location.search).get("token") || "";
+window.addEventListener("message", function (e) {
+  if (e.origin === location.origin && e.data && e.data.type === "luna-auth" && e.data.token) {
+    token = e.data.token;
+  }
+});
+try { window.parent.postMessage({ type: "luna-request-auth" }, location.origin); } catch (e) {}
+function authHeaders() { return token ? { "Authorization": "Bearer " + token } : {}; }
+
+// own-session analysers (only when the pane owns the call)
+var audioCtx = null, micAnalyser = null, lunaAnalyser = null, analyserBuf = null;
+function makeAnalyser(stream) {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    var src = audioCtx.createMediaStreamSource(stream);
+    var a = audioCtx.createAnalyser();
+    a.fftSize = 256;
+    analyserBuf = analyserBuf || new Uint8Array(a.frequencyBinCount);
+    src.connect(a);
+    return a;
+  } catch (e) { return null; }
+}
+function levelOf(analyser) {
+  if (!analyser) return 0;
+  analyser.getByteTimeDomainData(analyserBuf);
+  var sum = 0;
+  for (var i = 0; i < analyserBuf.length; i++) { var d = (analyserBuf[i] - 128) / 128; sum += d * d; }
+  return Math.min(1, Math.sqrt(sum / analyserBuf.length) * 4);
+}
+
+if (viz) viz.onmessage = function (e) {
+  var m = e.data;
+  if (!m) return;
+  if (m.type === "viz") {
+    lastFeedAt = performance.now();
+    remoteLive = m.state !== "idle" && m.state !== "error";
+    if (!ownCall) {
+      setState(m.state);
+      feedUser = m.userLevel || 0;
+      feedLuna = m.lunaLevel || 0;
+      if (m.muted !== muted) reflectMuted(!!m.muted);
+      syncButtons();
+    }
+  } else if (m.type === "react") {
+    react(m.shape);
+  } else if (m.type === "pong") {
+    lastFeedAt = performance.now();
+    remoteLive = !!m.live;
+    syncButtons();
+  } else if (m.cmd === "ping" && ownCall) {
+    viz.postMessage({ type: "pong", owner: "view", live: true });
+  } else if (m.cmd === "end" && ownCall) {
+    endOwn();
+  } else if (m.cmd === "mute" && ownCall) {
+    applyOwnMute(!!m.on);
+  }
+};
+
+// feed watchdog: a dead owner (closed tab) must not freeze the avatar mid-call
+setInterval(function () {
+  if (!ownCall && remoteLive && performance.now() - lastFeedAt > 2500) {
+    remoteLive = false;
+    setState("idle");
+    syncButtons();
+  }
+}, 1000);
+
+// ---------------------------------------------------------------- controls →
+var btnTalk = document.getElementById("btnTalk");
+var talkLabel = document.getElementById("talkLabel");
+var btnMute = document.getElementById("btnMute");
+var muteLabel = document.getElementById("muteLabel");
+var btnMicSetup = document.getElementById("btnMicSetup");
+
+function inCall() { return !!ownCall || remoteLive; }
+
+function syncButtons() {
+  var live = inCall();
+  talkLabel.textContent = live ? "End" : "Talk";
+  btnTalk.classList.toggle("primary", !live);
+  btnTalk.classList.toggle("danger", live);
+  btnMute.hidden = !live;
+}
+
+function reflectMuted(on) {
+  muted = on;
+  muteLabel.textContent = on ? "Unmute" : "Mute";
+  btnMute.classList.toggle("muted-on", on);
+}
+
+function applyOwnMute(on) {
+  if (ownCall && ownCall.setMuted) ownCall.setMuted(on);
+  reflectMuted(on);
+}
+
+async function startOwn() {
+  if (ownCall) return;
+  if (!window.LunaRT) { flashHint("Voice engine failed to load", true); return; }
+  setState("connecting");
+  syncButtons0(true);
+  try {
+    ownCall = await LunaRT.start({
+      api: API,
+      authHeaders: authHeaders,
+      onStatus: function () {},
+      onState: function (st) { setState(st); },
+      onReact: function (shape) {
+        react(shape);
+        if (viz) viz.postMessage({ type: "react", shape: shape });
+      },
+      onRemoteStream: function (stream) {
+        remoteAudio.srcObject = stream;
+        lunaAnalyser = makeAnalyser(stream);
+      },
+      onEnd: function (reason) {
+        ownCall = null;
+        micAnalyser = null; lunaAnalyser = null;
+        if (reason) { setState("error"); flashHint(reason, true, 8000); }
+        else setState("idle");
+        reflectMuted(false);
+        syncButtons();
+        broadcastFeed(true);
+      },
+    });
+    micAnalyser = makeAnalyser(ownCall.micStream);
+    syncButtons();
+  } catch (err) {
+    ownCall = null;
+    setState("error");
+    flashHint(String(err && err.message || err), true, 8000);
+    syncButtons();
+  }
+}
+function syncButtons0(live) {   // optimistic while connecting
+  talkLabel.textContent = live ? "End" : "Talk";
+  btnTalk.classList.toggle("primary", !live);
+  btnTalk.classList.toggle("danger", live);
+  btnMute.hidden = !live;
+}
+
+function endOwn() {
+  if (ownCall) ownCall.end();
+}
+
+btnTalk.addEventListener("click", function () {
+  if (ownCall) { endOwn(); return; }
+  if (remoteLive) { if (viz) viz.postMessage({ cmd: "end" }); return; }
+  // no live owner — ask the widget first; if nobody answers, own the session
+  var answered = false;
+  if (viz) {
+    var onPong = function (e) {
+      if (e.data && e.data.type === "pong") answered = true;
+    };
+    viz.addEventListener("message", onPong);
+    viz.postMessage({ cmd: "ping" });
+    setTimeout(function () {
+      viz.removeEventListener("message", onPong);
+      if (answered && remoteLive) return;    // someone owns a live call after all
+      startOwn();
+    }, 300);
+  } else {
+    startOwn();
+  }
+});
+
+btnMute.addEventListener("click", function () {
+  var on = !muted;
+  if (ownCall) applyOwnMute(on);
+  else if (viz) viz.postMessage({ cmd: "mute", on: on });
+});
+
+function refreshMicSetup() {
+  if (!navigator.permissions || !navigator.permissions.query) { btnMicSetup.hidden = false; return; }
+  navigator.permissions.query({ name: "microphone" }).then(function (st) {
+    btnMicSetup.hidden = st.state === "granted";
+    st.onchange = function () { btnMicSetup.hidden = st.state === "granted"; };
+  }).catch(function () { btnMicSetup.hidden = false; });
+}
+btnMicSetup.addEventListener("click", function () {
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+    s.getTracks().forEach(function (t) { t.stop(); });
+    btnMicSetup.hidden = true;
+    flashHint("Microphone ready");
+  }).catch(function () {
+    flashHint("Microphone blocked — allow it from the address bar", true, 6000);
+  });
+});
+refreshMicSetup();
+
+// owner duties: when the pane owns the call, it broadcasts the feed for the widget
+var lastBroadcast = 0;
+function broadcastFeed(force) {
+  if (!viz) return;
+  var now = performance.now();
+  if (!force && now - lastBroadcast < 33) return;   // ~30Hz
+  lastBroadcast = now;
+  viz.postMessage({
+    type: "viz", state: state, muted: muted, owner: "view",
+    userLevel: userLevel, lunaLevel: lunaLevel,
+  });
+}
+
+document.getElementById("reactions").addEventListener("click", function (e) {
+  var v = e.target.dataset && e.target.dataset.v;
+  if (v) react(v);
+});
+
+var mouse = [0, 0];
+window.addEventListener("pointermove", function (e) {
+  mouse[0] = (e.clientX / innerWidth) * 2 - 1;
+  mouse[1] = (e.clientY / innerHeight) * 2 - 1;
+});
+
+// -------------------------------------------------------------------- frame →
+var dpr = 1, dprCap = 2;
+function resize() {
+  dpr = Math.min(dprCap, window.devicePixelRatio || 1);
+  canvas.width = innerWidth * dpr;
+  canvas.height = innerHeight * dpr;
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+window.addEventListener("resize", resize);
+resize();
+
+var fpsEl = document.getElementById("fps");
+var fps = 60, lastT = performance.now(), fpsTick = 0;
+var raf = 0;
+
+// perf governor: 60 consecutive frames under ~45fps → drop DPR to 1 first,
+// then halve the drawn point count (floor 6k). Never recovers upward — a
+// machine that struggled once will struggle again.
+var DRAW_N = N, badFrames = 0;
+function perfGovern(dt) {
+  badFrames = dt > 22 ? badFrames + 1 : 0;
+  if (badFrames < 60) return;
+  badFrames = 0;
+  if (dpr > 1) { dprCap = 1; resize(); }
+  else if (DRAW_N > 6000) { DRAW_N = DRAW_N >> 1; }
+}
+
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  var dt = Math.min(50, now - lastT); lastT = now;
+  fps += (1000 / Math.max(1, dt) - fps) * 0.05;
+  perfGovern(dt);
+  if (DEBUG && now > fpsTick) { fpsEl.textContent = Math.round(fps) + " FPS · " + (DRAW_N/1000) + "k points"; fpsTick = now + 500; }
+
+  // level inputs: own analysers when owning, feed values otherwise
+  var uRaw, lRaw;
+  if (ownCall) {
+    uRaw = muted ? 0 : levelOf(micAnalyser);
+    lRaw = levelOf(lunaAnalyser);
+  } else {
+    uRaw = feedUser; lRaw = feedLuna;
+  }
+  userLevel += (uRaw - userLevel) * (uRaw > userLevel ? 0.5 : 0.12);
+  lunaLevel += (lRaw - lunaLevel) * (lRaw > lunaLevel ? 0.55 : 0.18);
+  var active = state === "speaking" ? lunaLevel : state === "listening" ? userLevel : 0;
+  var mouth = state === "speaking" ? lunaLevel : 0;
+  // error entrance: a brief, decaying jolt through the wobble channel
+  if (now < shiverUntil) active = Math.max(active, (shiverUntil - now) / 700 * 0.9);
+  if (REDUCED) { active = 0; mouth = 0; }
+
+  var tgt = STATES[state];
+  for (var i = 0; i < 3; i++) {
+    colA[i] += (tgt.a[i] - colA[i]) * 0.06;
+    colB[i] += (tgt.b[i] - colB[i]) * 0.06;
+  }
+  var pulse = state === "thinking" ? (Math.sin(now * 0.004) + 1) * 0.5 : 0;
+  fw += ((fwOn ? 1 : 0) - fw) * (fwOn ? 0.28 : 0.10);
+
+  if (ownCall) broadcastFeed();
+
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.uniform1f(U.uMorph, morphT(now));
+  gl.uniform1f(U.uTime, REDUCED ? 0 : now * 0.001);
+  gl.uniform1f(U.uLevel, active);
+  gl.uniform1f(U.uMouth, mouth);
+  gl.uniform1f(U.uPulse, REDUCED ? 0 : pulse);
+  gl.uniform1f(U.uAspect, innerWidth / innerHeight);
+  gl.uniform1f(U.uSize, Math.max(2.2, innerHeight / 340) * dpr);
+  gl.uniform1f(U.uFw, fw);
+  gl.uniform1f(U.uFwT, (now - fwStart) * 0.001);
+  gl.uniform2f(U.uMouse, REDUCED ? 0 : mouse[0], REDUCED ? 0 : mouse[1]);
+  gl.uniform3fv(U.uColorA, colA);
+  gl.uniform3fv(U.uColorB, colB);
+  gl.drawArrays(gl.POINTS, 0, DRAW_N);
+}
+
+document.addEventListener("visibilitychange", function () {
+  if (document.hidden) { cancelAnimationFrame(raf); raf = 0; }
+  else if (!raf) { lastT = performance.now(); raf = requestAnimationFrame(frame); }
+});
+
+// discover a running session on load
+if (viz) viz.postMessage({ cmd: "ping" });
+syncButtons();
+raf = requestAnimationFrame(frame);
+flashLabel("Idle");
+})();
+</script>
+</body>
+</html>

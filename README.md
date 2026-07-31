@@ -60,6 +60,20 @@ hosted voice needs your own pasted OpenAI key. Since 0.5.2 the Setup page
 probes the detected key with a real mint and says exactly why voice can't
 start, keeping the paste field available.
 
+## Luna View
+
+Since 0.6.0 the widget's expand button opens **Luna View** — a full pane where
+you *see* Luna while talking: ~24k WebGL2 dots that idle as an orb, become an
+articulated face in-call, tremble with the audio actually heard and spoken,
+and fire reaction shapes (heart, thumbs up, rocket, strong arm, fireworks)
+when Luna decides they fit. On cores with hidden-section support (≥ 0.54) the
+pane has no sidebar link; older cores show a visible "Luna" link instead.
+
+The head model (`plugin_voice/ui/view/head.bin`) is a point-cloud sample of
+the "Face Cap" demo head by [Face Cap](https://www.bannaflak.com/face-cap),
+as distributed with the [three.js](https://threejs.org) examples
+(`models/gltf/facecap.glb`).
+
 ## Dojo
 
 `EL_KEY=sk_... .venv/bin/python tests/dojo/run_dojo.py` — synthesizes a
