@@ -842,9 +842,9 @@ window.addEventListener("pointermove", function (e) {
 });
 
 // -------------------------------------------------------------------- frame →
-var dpr = 1, dprCap = 2;
+var dpr = 1;
 function resize() {
-  dpr = Math.min(dprCap, window.devicePixelRatio || 1);
+  dpr = Math.min(2, window.devicePixelRatio || 1);
   canvas.width = innerWidth * dpr;
   canvas.height = innerHeight * dpr;
   gl.viewport(0, 0, canvas.width, canvas.height);
@@ -856,26 +856,28 @@ var fpsEl = document.getElementById("fps");
 var fps = 60, lastT = performance.now(), fpsTick = 0;
 var raf = 0;
 
-// perf governor (v2, 0.6.1): degrade only under sustained real struggle, and
-// — unlike v1 — recover when the frame rate is comfortable again. v1 never
-// recovered, so one throttled stretch (occluded iframe, busy machine, call
-// setup) left the avatar permanently at half resolution / quarter points —
-// "weird super strong dots" instead of the mock's even glow.
-var DRAW_N = N, badFrames = 0, goodFrames = 0;
+// perf governor (v3, 0.7.1): NEVER trades resolution away — dropping DPR made
+// chunky "super strong dots" on any machine that sat under 45fps in a real
+// call, which is exactly the render the owner kept reporting. The look is the
+// product; smoothness bends first. Only under genuinely bad frames (~sub-30fps
+// sustained) it halves the drawn points once (24k → 12k, visually near
+// identical), and it climbs back when frames are comfortable again.
+// Leaky buckets, not consecutive counts: janky periods interleave slow frames
+// with fast catch-up frames, and a single good frame must not amnesty a bad
+// stretch (that's how v2's counter under-reported sustained struggle).
+var DRAW_N = N, badScore = 0, goodScore = 0;
 var governMuteUntil = performance.now() + 5000;   // warm-up: skip load jank
 function perfGovern(dt, now) {
-  if (document.hidden || now < governMuteUntil) { badFrames = 0; goodFrames = 0; return; }
-  if (dt > 22) { badFrames++; goodFrames = 0; }
-  else { badFrames = 0; if (dt < 18) goodFrames++; }
-  if (badFrames >= 120) {                         // ~3s under ~45fps → step down
-    badFrames = 0;
-    if (dpr > 1) { dprCap = 1; resize(); }
-    else if (DRAW_N > 12000) { DRAW_N = DRAW_N >> 1; }
+  if (document.hidden || now < governMuteUntil) { badScore = 0; goodScore = 0; return; }
+  badScore = dt > 34 ? badScore + 2 : Math.max(0, badScore - 1);
+  goodScore = dt < 20 ? goodScore + 1 : Math.max(0, goodScore - 2);
+  if (badScore >= 240) {                          // ~5s of ~sub-30fps → trim points
+    badScore = 0; goodScore = 0;
+    if (DRAW_N > 12000) { DRAW_N = DRAW_N >> 1; }
     governMuteUntil = now + 3000;                 // let the cheaper setting settle
-  } else if (goodFrames >= 600) {                 // ~10s above ~55fps → step back up
-    goodFrames = 0;
-    if (DRAW_N < N) { DRAW_N = Math.min(N, DRAW_N << 1); }
-    else if (dprCap < 2) { dprCap = 2; resize(); }
+  } else if (goodScore >= 600) {                  // ~10s of ~50fps+ → restore
+    badScore = 0; goodScore = 0;
+    DRAW_N = Math.min(N, DRAW_N << 1);
     governMuteUntil = now + 3000;
   }
 }
