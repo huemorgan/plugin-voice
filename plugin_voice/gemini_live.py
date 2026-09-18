@@ -99,6 +99,11 @@ async def resolve_gemini_key(ctx: Any, *, vault_key: str) -> dict | None:
     authenticates directly against Google, which a gateway virtual key can't —
     the same reason the old OpenAI path refused gateway keys (audio never
     traverses the gateway, so platform billing can't meter it).
+
+    Hosted machines carry ``LUNA_GEMINI_API_KEY``/``GEMINI_API_KEY`` set to the
+    platform's lsv1- gateway token (the chat-proxy pair) — that token can never
+    mint against Google, so lsv1- values are skipped here rather than forwarded
+    to Google to die as an opaque HTTP 400 "API key not valid".
     """
     vault = getattr(ctx, "vault", None)
     if vault is not None:
@@ -115,9 +120,9 @@ async def resolve_gemini_key(ctx: Any, *, vault_key: str) -> dict | None:
         value = ""
         if callable(get_env) and var.startswith("LUNA_"):
             value = (get_env(var) or "").strip()
-        if not value:
+        if not value or value.startswith("lsv1-"):
             value = (os.environ.get(var) or "").strip()
-        if value:
+        if value and not value.startswith("lsv1-"):
             return {"api_key": value, "source": "env"}
     return None
 

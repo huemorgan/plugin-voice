@@ -26,7 +26,7 @@ class VoicePlugin(LunaPlugin):
         name="plugin-voice",
         shown_name="Voice",
         icon="mic",
-        version="0.8.0",
+        version="0.8.1",
         description=(
             "Full-duplex voice conversations that know who is speaking — "
             "Gemini Live speech-to-speech in this agent's own persona, "

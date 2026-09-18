@@ -326,6 +326,23 @@ def test_resolve_never_uses_the_gateway(client, ctx):
     assert st["connected"] is False and st["key_source"] is None
 
 
+def test_resolve_skips_lsv1_gateway_tokens_in_env(client, ctx, monkeypatch):
+    """0.8.1: hosted machines carry LUNA_GEMINI_API_KEY/GEMINI_API_KEY set to
+    the platform's lsv1- gateway token (the chat-proxy pair). That token can
+    never mint against Google — resolution must skip it (falling through to a
+    real key if one exists, else 'not connected') instead of forwarding it to
+    Google to die as an opaque HTTP 400."""
+    monkeypatch.setenv("LUNA_GEMINI_API_KEY", "lsv1-tenant-token")
+    monkeypatch.setenv("GEMINI_API_KEY", "lsv1-tenant-token")
+    st = client.get(f"{API}/status").json()
+    assert st["connected"] is False and st["key_source"] is None
+
+    # a real key behind the poisoned LUNA_ var still wins
+    monkeypatch.setenv("GEMINI_API_KEY", "gk-real")
+    st = client.get(f"{API}/status").json()
+    assert st["connected"] is True and st["key_source"] == "env"
+
+
 def test_settings_page_gates_cards_until_ready(client):
     html = client.get(f"{API}/ui/settings/").text
     assert "gateCards" in html and 'data-testid="voice-connect-gateway"' in html

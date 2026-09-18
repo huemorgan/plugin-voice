@@ -1,6 +1,6 @@
 [project]
 name = "plugin-voice"
-version = "0.8.0"
+version = "0.8.1"
 description = "Talk to Luna by voice in the browser — OpenAI Realtime speech-to-speech talker, Luna stays the hands."
 readme = "README.md"
 requires-python = ">=3.11"

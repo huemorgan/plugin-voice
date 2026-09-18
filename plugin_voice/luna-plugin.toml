@@ -1,6 +1,6 @@
 name = "plugin-voice"
 shown_name = "Voice"
-version = "0.8.0"
+version = "0.8.1"
 description = "Full-duplex voice conversations that know who is speaking — Gemini Live speech-to-speech in this agent's own persona, noise-robust turn taking, owner voice imprint, in-call knowledge tools, Luna stays the hands for real work."
 entry = "plugin_voice"
 sdk_version = "0"
