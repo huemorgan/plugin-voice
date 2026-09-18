@@ -1,6 +1,6 @@
 """plugin-voice — full-duplex, interruptible voice conversations with Luna.
 
-OpenAI Realtime speech-to-speech does the talking (lane 1) in Luna's persona,
+Gemini Live speech-to-speech does the talking (lane 1) in Luna's persona,
 read-only info tools answer fast questions in-call (lane 2), and the real Luna
 agent runs delegated work in the background (lane 3) — its results come back
 as short spoken summaries, never verbatim text. Authored against `luna_sdk`
@@ -16,7 +16,8 @@ from luna_sdk import LunaPlugin, PluginContext, PluginManifest, SettingsTab, Too
 log = logging.getLogger("plugin-voice")
 
 # Vault keys (all owned by this plugin; ACL-scoped by the vault provider).
-VAULT_OPENAI_KEY = "plugin_voice.openai_api_key"  # 005: realtime S2S talker
+VAULT_GEMINI_KEY = "plugin_voice.gemini_api_key"  # 007: Gemini Live talker
+VAULT_OPENAI_KEY = "plugin_voice.openai_api_key"  # pre-0.8.0 legacy — deleted on disconnect
 VAULT_SETTINGS = "plugin_voice.settings"  # non-secret JSON; vault used as the plugin's durable KV
 
 
@@ -25,12 +26,12 @@ class VoicePlugin(LunaPlugin):
         name="plugin-voice",
         shown_name="Voice",
         icon="mic",
-        version="0.7.1",
+        version="0.8.0",
         description=(
             "Full-duplex voice conversations that know who is speaking — "
-            "OpenAI Realtime speech-to-speech in this agent's own persona, "
-            "owner voice imprint, in-call knowledge tools, Luna stays the "
-            "hands for real work."
+            "Gemini Live speech-to-speech in this agent's own persona, "
+            "noise-robust turn taking, owner voice imprint, in-call knowledge "
+            "tools, Luna stays the hands for real work."
         ),
         category="global",
         depends_on=["plugin-vault"],
@@ -71,7 +72,7 @@ class VoicePlugin(LunaPlugin):
 
         # 003: the agent can check and COMPLETE the voice setup from chat —
         # "connect the voice plugin" just works once a key exists anywhere in
-        # the chain (own/vault-grant/gateway/env). The key value never passes
+        # the chain (own pasted key or env). The key value never passes
         # through the agent; resolution happens server-side in setup.py.
         async def _voice_status() -> dict:
             try:
@@ -79,10 +80,10 @@ class VoicePlugin(LunaPlugin):
             except setup.SetupError as exc:
                 return {"error": str(exc)}
             st["note"] = (
-                "connected=OpenAI key resolvable (source in key_source: own/"
-                "vault/gateway/env). If not connected, the owner can paste a "
-                "key in Settings → Voice, or call voice_connect after wiring "
-                "a gateway key."
+                "connected=Gemini key resolvable (source in key_source: "
+                "own/env). If not connected, the owner can paste a Google "
+                "AI (Gemini) API key in Settings → Voice, or call "
+                "voice_connect once a key exists in the environment."
             )
             return st
 
@@ -99,10 +100,10 @@ class VoicePlugin(LunaPlugin):
             ToolDef(
                 name="voice_status",
                 description=(
-                    "Status of the voice (plugin-voice) setup: whether an "
-                    "OpenAI key is available (pasted, vault grant, hosted "
-                    "gateway, or env), the realtime voice/model in use, and "
-                    "whether the owner's voice imprint exists."
+                    "Status of the voice (plugin-voice) setup: whether a "
+                    "Gemini API key is available (pasted or env), the live "
+                    "voice/model in use, and whether the owner's voice "
+                    "imprint exists."
                 ),
                 parameters={"type": "object", "properties": {}},
                 policy="auto_approve",
@@ -117,10 +118,9 @@ class VoicePlugin(LunaPlugin):
                 name="voice_connect",
                 description=(
                     "Complete the voice (plugin-voice) setup using whatever "
-                    "OpenAI key is already available (vault grant, hosted "
-                    "gateway key, or env) — validates the key against the "
-                    "Realtime API and sets up this agent's own persona and "
-                    "voice for the talker. Use after wiring a gateway key, or "
+                    "Gemini API key is already available (pasted or env) — "
+                    "validates the key against the Gemini API and sets up "
+                    "this agent's own persona and voice for the talker. Use "
                     "when voice_status says not connected. No key value is "
                     "exposed."
                 ),

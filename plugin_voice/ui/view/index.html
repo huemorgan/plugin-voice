@@ -694,7 +694,7 @@ function applyOwnMute(on) {
 
 async function startOwn() {
   // Synchronous latch over the ~2s connect await — without it a second trigger
-  // (double-tap, widget race) starts a competing OpenAI session that repeats
+  // (double-tap, widget race) starts a competing Gemini session that repeats
   // every answer from scratch.
   if (ownCall || startingOwn) return;
   if (!window.LunaRT) { flashHint("Voice engine failed to load", true); return; }

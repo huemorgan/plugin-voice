@@ -1,17 +1,17 @@
 name = "plugin-voice"
 shown_name = "Voice"
-version = "0.7.1"
-description = "Full-duplex voice conversations that know who is speaking — OpenAI Realtime speech-to-speech in this agent's own persona, owner voice imprint, in-call knowledge tools, Luna stays the hands for real work."
+version = "0.8.0"
+description = "Full-duplex voice conversations that know who is speaking — Gemini Live speech-to-speech in this agent's own persona, noise-robust turn taking, owner voice imprint, in-call knowledge tools, Luna stays the hands for real work."
 entry = "plugin_voice"
 sdk_version = "0"
 license = "MIT"
-tags = ["voice", "talk", "realtime", "openai", "interface"]
+tags = ["voice", "talk", "realtime", "gemini", "interface"]
 readme = """
 # plugin-voice
 
 Talk with your agent by voice — full duplex, interruptible, and it knows who's
 talking. plugin-voice adds a sidebar voice widget (live waveforms for you and
-the agent) powered by OpenAI Realtime speech-to-speech, working in three lanes:
+the agent) powered by Gemini Live speech-to-speech, working in three lanes:
 
 - **Talking**: the realtime model speaks AS your agent — its real name,
   greeting, attitude, and filler style, replicated from the agent's own
@@ -26,8 +26,14 @@ Beyond plugin-talk, this plugin adds an **owner voice imprint**: record a few
 phrases in Settings; the plugin builds a voice profile and flags whether the
 current speaker is you — unrecognized voices get read-only politeness.
 
-Requires plugin-vault and an OpenAI API key (pasted, granted, gateway, or
-env). Audio flows browser ⇄ OpenAI over WebRTC; the imprint check runs on
+Built to hold up in rooms that aren't silent: server-side voice activity
+detection tuned so beeps and background chatter don't open turns, and the
+model itself declines to answer audio that clearly isn't addressed to it.
+Interrupt it naturally — it stops, listens, and picks up where it left off.
+
+Requires plugin-vault and a Google AI (Gemini) API key (pasted or env). Audio
+flows browser ⇄ Google over a WebSocket armed with a short-lived session
+token — your API key never reaches the browser; the imprint check runs on
 lightweight spectral features on your Luna, never leaving it.
 
 The Luna View head model (`head.bin`) is a point-cloud sample of the
@@ -43,12 +49,12 @@ depends_on = ["plugin-vault"]
 
 [[tools]]
 name = "voice_status"
-description = "Status of the voice setup: OpenAI key availability (own/vault/gateway/env), realtime voice and model, imprint ready."
+description = "Status of the voice setup: Gemini key availability (own/env), live voice and model, imprint ready."
 policy = "auto_approve"
 risk_level = "low"
 
 [[tools]]
 name = "voice_connect"
-description = "Complete the voice setup with whatever OpenAI key is available; validates it against the Realtime API and sets up the personality-matched talker."
+description = "Complete the voice setup with whatever Gemini key is available; validates it against the Gemini API and sets up the personality-matched talker."
 policy = "ask"
 risk_level = "medium"

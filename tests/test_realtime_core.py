@@ -1,5 +1,5 @@
-"""Phase 01 (005): OpenAI key resolution, client-secret minting, talker
-instructions, /rt/session."""
+"""007: Gemini key resolution, ephemeral token minting, setup message shape,
+talker instructions, /rt/session."""
 
 from __future__ import annotations
 
@@ -8,73 +8,60 @@ import json
 import httpx
 import pytest
 
-from plugin_voice import VAULT_OPENAI_KEY, openai_realtime, talker
-from plugin_voice.openai_realtime import (
+from plugin_voice import VAULT_GEMINI_KEY, gemini_live, talker
+from plugin_voice.gemini_live import (
     DEFAULT_MODEL,
     DEFAULT_VOICE,
-    RealtimeClient,
+    LIVE_WS_URL,
+    GeminiLiveClient,
     RealtimeError,
-    resolve_openai_key,
-    session_config,
+    convert_tools,
+    resolve_gemini_key,
+    setup_message,
 )
 
 
 @pytest.fixture(autouse=True)
 def _no_env_keys(monkeypatch):
-    monkeypatch.delenv("LUNA_OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LUNA_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
 
 # ---------------------------------------------------------------- key chain
 
 
 async def test_pasted_key_wins(ctx, monkeypatch):
-    ctx.vault.data[VAULT_OPENAI_KEY] = "sk-own"
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
-    res = await resolve_openai_key(ctx, vault_key=VAULT_OPENAI_KEY)
-    assert res == {"api_key": "sk-own", "source": "own"}
-
-
-async def test_gateway_connection_used(ctx):
-    from luna_sdk import AuthSpec, Connection
-
-    ctx.vault.gateway_connection = Connection(
-        base_url="https://gw.example/openai",
-        secret="virt-123",
-        auth=AuthSpec(location="header", name="Authorization", scheme="Bearer"),
-        source="virtual",
-    )
-    res = await resolve_openai_key(ctx, vault_key=VAULT_OPENAI_KEY)
-    assert res["source"] == "gateway"
-    assert res["base_url"] == "https://gw.example/openai"
-    assert res["headers"]["Authorization"] == "Bearer virt-123"
+    ctx.vault.data[VAULT_GEMINI_KEY] = "gk-own"
+    monkeypatch.setenv("GEMINI_API_KEY", "gk-env")
+    res = await resolve_gemini_key(ctx, vault_key=VAULT_GEMINI_KEY)
+    assert res == {"api_key": "gk-own", "source": "own"}
 
 
 async def test_env_keys_both_spellings(ctx, monkeypatch):
-    ctx.get_env = lambda name: "sk-luna-env" if name == "LUNA_OPENAI_API_KEY" else None
-    res = await resolve_openai_key(ctx, vault_key=VAULT_OPENAI_KEY)
-    assert res == {"api_key": "sk-luna-env", "source": "env"}
+    ctx.get_env = lambda name: "gk-luna-env" if name == "LUNA_GEMINI_API_KEY" else None
+    res = await resolve_gemini_key(ctx, vault_key=VAULT_GEMINI_KEY)
+    assert res == {"api_key": "gk-luna-env", "source": "env"}
 
     ctx.get_env = lambda name: None
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-bare-env")
-    res = await resolve_openai_key(ctx, vault_key=VAULT_OPENAI_KEY)
-    assert res == {"api_key": "sk-bare-env", "source": "env"}
+    monkeypatch.setenv("GEMINI_API_KEY", "gk-bare-env")
+    res = await resolve_gemini_key(ctx, vault_key=VAULT_GEMINI_KEY)
+    assert res == {"api_key": "gk-bare-env", "source": "env"}
 
 
 async def test_no_key_anywhere(ctx):
-    assert await resolve_openai_key(ctx, vault_key=VAULT_OPENAI_KEY) is None
+    assert await resolve_gemini_key(ctx, vault_key=VAULT_GEMINI_KEY) is None
 
 
 # ------------------------------------------------------------------ minting
 
 
-def _client_with(handler) -> RealtimeClient:
-    rc = RealtimeClient("sk-test")
-    rc._http = httpx.AsyncClient(
-        base_url="https://api.openai.com",
+def _client_with(handler) -> GeminiLiveClient:
+    gc = GeminiLiveClient("gk-test")
+    gc._http = httpx.AsyncClient(
+        base_url=gemini_live.DEFAULT_BASE_URL,
         transport=httpx.MockTransport(handler),
     )
-    return rc
+    return gc
 
 
 async def test_mint_happy_path():
@@ -83,66 +70,132 @@ async def test_mint_happy_path():
     def handler(request: httpx.Request) -> httpx.Response:
         seen["path"] = request.url.path
         seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json={"value": "ek_abc", "expires_at": 123, "session": {}})
+        return httpx.Response(200, json={"name": "auth_tokens/abc", "expireTime": "2099-01-01T00:00:00Z"})
 
-    rc = _client_with(handler)
-    minted = await rc.mint_client_secret({"type": "realtime", "model": DEFAULT_MODEL})
-    await rc.close()
-    assert minted["value"] == "ek_abc"
-    assert seen["path"] == "/v1/realtime/client_secrets"
-    assert seen["body"]["session"]["model"] == DEFAULT_MODEL
+    gc = _client_with(handler)
+    minted = await gc.mint_token(setup_message(instructions="be luna"))
+    await gc.close()
+    assert minted["name"] == "auth_tokens/abc"
+    assert seen["path"] == "/v1alpha/auth_tokens"
+    # the constraint carries the FULL setup, locking it server-side
+    body = seen["body"]
+    assert body["uses"] == gemini_live.TOKEN_USES
+    assert body["expireTime"] and body["newSessionExpireTime"]
+    # newSessionExpireTime must span the whole call: Google forces a
+    # resumption reconnect (= a NEW session on this token) every ~10 min, and
+    # a short window kills the call there (phase-3 soak, 10.3 min, error
+    # "new_session_expire_time deadline exceeded").
+    assert body["newSessionExpireTime"] == body["expireTime"]
+    assert body["bidiGenerateContentSetup"]["model"] == f"models/{DEFAULT_MODEL}"
+    assert "be luna" in body["bidiGenerateContentSetup"]["systemInstruction"]["parts"][0]["text"]
 
 
 @pytest.mark.parametrize(
     ("status", "needle"),
     [
         (401, "rejected the key"),
-        (402, "paste your own OpenAI API key"),
-        (404, "may not support Realtime"),
+        (403, "rejected the key"),
+        (429, "rate limit"),
         (500, "HTTP 500"),
     ],
 )
 async def test_mint_errors_are_speakable(status, needle):
-    rc = _client_with(lambda request: httpx.Response(status, json={}))
+    gc = _client_with(lambda request: httpx.Response(status, json={}))
     with pytest.raises(RealtimeError, match=needle):
-        await rc.mint_client_secret({"type": "realtime"})
-    await rc.close()
+        await gc.mint_token(setup_message(instructions="x"))
+    await gc.close()
 
 
-async def test_mint_missing_value_rejected():
-    rc = _client_with(lambda request: httpx.Response(200, json={"session": {}}))
-    with pytest.raises(RealtimeError, match="no client secret"):
-        await rc.mint_client_secret({"type": "realtime"})
-    await rc.close()
+async def test_mint_400_surfaces_google_detail():
+    gc = _client_with(lambda request: httpx.Response(
+        400, json={"error": {"message": "Cannot find field bogus"}}
+    ))
+    with pytest.raises(RealtimeError, match="Cannot find field bogus"):
+        await gc.mint_token(setup_message(instructions="x"))
+    await gc.close()
 
 
-# ----------------------------------------------------------- session config
+async def test_mint_missing_name_rejected():
+    gc = _client_with(lambda request: httpx.Response(200, json={}))
+    with pytest.raises(RealtimeError, match="no session token"):
+        await gc.mint_token(setup_message(instructions="x"))
+    await gc.close()
 
 
-def test_session_config_shape():
-    cfg = session_config(
-        instructions="be luna", voice="cedar", model="gpt-realtime-2.1-mini",
-        tools=[{"type": "function", "name": "x"}], turn_eagerness="patient",
-    )
-    assert cfg["type"] == "realtime"
-    assert cfg["model"] == "gpt-realtime-2.1-mini"
-    assert cfg["instructions"] == "be luna"
-    assert cfg["tools"] == [{"type": "function", "name": "x"}]
-    assert cfg["audio"]["input"]["turn_detection"] == {"type": "semantic_vad", "eagerness": "low"}
-    assert cfg["audio"]["output"]["voice"] == "cedar"
+# ------------------------------------------------------------ setup message
 
 
-def test_session_config_falls_back_on_unknown_values():
-    cfg = session_config(instructions="x", voice="not-a-voice", model="gpt-5-imaginary")
-    assert cfg["model"] == DEFAULT_MODEL
-    assert cfg["audio"]["output"]["voice"] == DEFAULT_VOICE
-    assert cfg["audio"]["input"]["turn_detection"]["eagerness"] == "auto"
+def test_setup_message_shape():
+    setup = setup_message(
+        instructions="be luna",
+        voice="Kore",
+        model="gemini-3.8-live-extended-thinking",
+        tools=[{"type": "function", "name": "get_weather", "description": "d",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                               "required": ["city"]}}],
+        turn_eagerness="patient",
+    )["setup"]
+    assert setup["model"] == "models/gemini-3.8-live-extended-thinking"
+    gen = setup["generationConfig"]
+    assert gen["responseModalities"] == ["AUDIO"]
+    assert gen["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] == "Kore"
+    assert setup["systemInstruction"]["parts"] == [{"text": "be luna"}]
+    decls = setup["tools"][0]["functionDeclarations"]
+    assert decls[0]["name"] == "get_weather"
+    assert decls[0]["parameters"]["type"] == "OBJECT"
+    assert decls[0]["parameters"]["properties"]["city"]["type"] == "STRING"
+    vad = setup["realtimeInputConfig"]["automaticActivityDetection"]
+    assert vad["startOfSpeechSensitivity"] == "START_SENSITIVITY_LOW"
+    assert vad["silenceDurationMs"] == 800
+    # the noise-robustness + long-call knobs are always on
+    assert setup["proactivity"] == {"proactiveAudio": True}
+    assert setup["outputAudioTranscription"] == {}
+    assert setup["contextWindowCompression"]["slidingWindow"]
+    assert setup["sessionResumption"] == {}
 
 
-def test_session_config_caps_output_tokens():
-    # A runaway-monologue backstop: default cap present, overridable.
-    assert session_config(instructions="x")["max_output_tokens"] == 500
-    assert session_config(instructions="x", max_output_tokens=120)["max_output_tokens"] == 120
+def test_setup_message_falls_back_on_unknown_values():
+    setup = setup_message(
+        instructions="x", voice="marin", model="gpt-realtime-2.1", turn_eagerness="bogus"
+    )["setup"]
+    assert setup["model"] == f"models/{DEFAULT_MODEL}"
+    voice = setup["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"]
+    assert voice == DEFAULT_VOICE
+    vad = setup["realtimeInputConfig"]["automaticActivityDetection"]
+    assert vad == gemini_live.VAD_PRESETS["normal"]
+
+
+def test_vad_presets_keep_noise_out_except_eager():
+    # LOW start sensitivity everywhere except eager: beeps and background
+    # chatter must not open turns (the owner's core requirement).
+    for name, preset in gemini_live.VAD_PRESETS.items():
+        expected = "START_SENSITIVITY_HIGH" if name == "eager" else "START_SENSITIVITY_LOW"
+        assert preset["startOfSpeechSensitivity"] == expected
+    assert set(gemini_live.VAD_PRESETS) == {"patient", "normal", "eager"}
+
+
+def test_convert_tools_shapes_and_empty_params():
+    out = convert_tools([
+        {"type": "function", "name": "a", "description": "da",
+         "parameters": {"type": "object", "properties": {}}},
+        {"type": "function", "name": "b", "description": "db",
+         "parameters": {"type": "object", "properties": {
+             "items": {"type": "array", "items": {"type": "integer"}}}}},
+    ])
+    assert len(out) == 1
+    decls = out[0]["functionDeclarations"]
+    assert decls[0] == {"name": "a", "description": "da"}  # empty schema omitted
+    assert decls[1]["parameters"]["properties"]["items"]["type"] == "ARRAY"
+    assert decls[1]["parameters"]["properties"]["items"]["items"]["type"] == "INTEGER"
+    assert convert_tools([]) == []
+    assert convert_tools(None) == []
+
+
+def test_ws_url_is_the_constrained_method():
+    # Tokens are only accepted by BidiGenerateContentConstrained on v1alpha —
+    # the plain method refuses them ("unregistered callers").
+    assert "v1alpha" in LIVE_WS_URL
+    assert LIVE_WS_URL.endswith("BidiGenerateContentConstrained")
 
 
 # ------------------------------------------------------------- instructions
@@ -189,6 +242,15 @@ def test_instructions_carry_quiet_discipline():
     assert "do not acknowledge" in text.lower()
 
 
+def test_instructions_carry_noise_and_interruption_demeanor():
+    # A false barge-in (beep, cough) cuts Gemini's audio — the talker must
+    # resume naturally, never comment on noise, never go quiet from it.
+    text = talker.build_instructions(persona_name="Luna", has_imprint=False)
+    assert "pick up naturally where you left off" in text
+    assert "don't restart the whole sentence" in text
+    assert "never go quiet just because the room is noisy" in text
+
+
 def test_instructions_owner_style_and_extra_win():
     text = talker.build_instructions(
         persona_name="Luna",
@@ -204,86 +266,77 @@ def test_instructions_owner_style_and_extra_win():
 # ------------------------------------------------------------- /rt/session
 
 
-class FakeRT:
-    """Stands in for RealtimeClient in routes — no network."""
-
-    instances: list["FakeRT"] = []
-    fail: RealtimeError | None = None
-    last_session: dict | None = None
-
-    def __init__(self, api_key=None, **kw):
-        self.api_key = api_key
-        self.kwargs = kw
-        self.closed = False
-        FakeRT.instances.append(self)
-
-    async def mint_client_secret(self, session):
-        if FakeRT.fail is not None:
-            raise FakeRT.fail
-        FakeRT.last_session = session
-        return {"value": "ek_test", "expires_at": 42, "session": session}
-
-    async def close(self):
-        self.closed = True
-
-
 @pytest.fixture()
-def rt(monkeypatch):
-    FakeRT.instances = []
-    FakeRT.fail = None
-    FakeRT.last_session = None
-    monkeypatch.setattr(openai_realtime, "RealtimeClient", FakeRT)
-    return FakeRT
+def rt():
+    # conftest's autouse patch replaced GeminiLiveClient with FakeLive —
+    # reading it off the module dodges an import-by-path of conftest itself.
+    return gemini_live.GeminiLiveClient
 
 
 def test_rt_session_requires_a_key(client, rt):
     resp = client.get("/api/p/plugin-voice/rt/session")
     assert resp.status_code == 400
-    assert "OpenAI key" in resp.json()["detail"]
+    assert "Gemini key" in resp.json()["detail"]
 
 
 def test_rt_session_happy_path(client, ctx, rt):
-    ctx.vault.data[VAULT_OPENAI_KEY] = "sk-own"
+    ctx.vault.data[VAULT_GEMINI_KEY] = "gk-own"
     ctx.vault.data["plugin_voice.settings"] = json.dumps(
-        {"persona_name": "T-800", "rt_voice": "cedar", "rt_model": "gpt-realtime-2.1-mini"}
+        {"persona_name": "T-800", "rt_voice": "Kore", "rt_model": "gemini-3.8-live-extended-thinking"}
     )
     resp = client.get("/api/p/plugin-voice/rt/session")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["client_secret"] == "ek_test"
-    assert data["model"] == "gpt-realtime-2.1-mini"
-    assert data["voice"] == "cedar"
+    assert data["access_token"] == "auth_tokens/test-token"
+    assert data["ws_url"] == LIVE_WS_URL
+    assert data["model"] == "gemini-3.8-live-extended-thinking"
+    assert data["voice"] == "Kore"
     assert data["persona_name"] == "T-800"
-    assert data["webrtc_url"].startswith("https://api.openai.com/")
     assert data["rt_token"]
     assert data["has_imprint"] is False and data["live_token"] is None
-    # minted session carries the talker instructions and persona voice
-    assert "live voice of T-800" in FakeRT.last_session["instructions"]
-    assert FakeRT.last_session["audio"]["output"]["voice"] == "cedar"
+    # the payload carries the FULL setup for the client to send verbatim —
+    # it must match what the token was constrained with
+    setup = data["setup"]["setup"]
+    assert setup == rt.minted[-1]["setup"]
+    assert "live voice of T-800" in setup["systemInstruction"]["parts"][0]["text"]
+    assert setup["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"] == "Kore"
     # the plugin token is armed for the relay surfaces
     from plugin_voice import state as live_state
 
     assert live_state.live_token_valid(data["rt_token"])
     # server key never reaches the browser payload
-    assert "sk-own" not in json.dumps(data)
+    assert "gk-own" not in json.dumps(data)
     # POST works the same (hosted widgets may prefer it)
     assert client.post("/api/p/plugin-voice/rt/session").status_code == 200
 
 
+def test_rt_session_stale_openai_settings_fall_back(client, ctx, rt):
+    """A migrated install still has 'marin'/'gpt-realtime-2.1' stored — the
+    mint must fall back to Gemini defaults, never dead-end the call button."""
+    ctx.vault.data[VAULT_GEMINI_KEY] = "gk-own"
+    ctx.vault.data["plugin_voice.settings"] = json.dumps(
+        {"rt_voice": "marin", "rt_model": "gpt-realtime-2.1"}
+    )
+    data = client.get("/api/p/plugin-voice/rt/session").json()
+    assert data["model"] == DEFAULT_MODEL
+    assert data["voice"] == DEFAULT_VOICE
+
+
 def test_rt_session_live_token_when_imprinted(client, ctx, rt):
-    ctx.vault.data[VAULT_OPENAI_KEY] = "sk-own"
+    ctx.vault.data[VAULT_GEMINI_KEY] = "gk-own"
     ctx.vault.data["plugin_voice.voice_profile"] = json.dumps({"profile": [0.1] * 8})
     data = client.get("/api/p/plugin-voice/rt/session").json()
     assert data["has_imprint"] is True
     assert data["live_token"] == data["rt_token"]
-    assert "[voice check:" in FakeRT.last_session["instructions"]
+    setup = rt.minted[-1]["setup"]
+    assert "[voice check:" in setup["systemInstruction"]["parts"][0]["text"]
 
 
 def test_rt_session_mint_failure_is_400_with_detail(client, ctx, rt):
     """400, not 502 — hosted edges replace 5xx JSON bodies with HTML pages,
     which would hide the actionable message from the widget."""
-    ctx.vault.data[VAULT_OPENAI_KEY] = "sk-own"
-    rt.fail = RealtimeError("OpenAI rejected the key (HTTP 401) — check it in Settings → Voice")
+    ctx.vault.data[VAULT_GEMINI_KEY] = "gk-own"
+    rt.fail_mint = True
     resp = client.get("/api/p/plugin-voice/rt/session")
     assert resp.status_code == 400
     assert "rejected the key" in resp.json()["detail"]
@@ -292,6 +345,6 @@ def test_rt_session_mint_failure_is_400_with_detail(client, ctx, rt):
 
 def test_rt_session_no_persona_fetch(client, ctx, rt):
     """Session minting must never block on the ~30s persona LLM fetch."""
-    ctx.vault.data[VAULT_OPENAI_KEY] = "sk-own"
+    ctx.vault.data[VAULT_GEMINI_KEY] = "gk-own"
     client.get("/api/p/plugin-voice/rt/session")
     assert ctx.agent.calls == []

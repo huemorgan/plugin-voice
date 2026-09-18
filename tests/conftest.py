@@ -211,30 +211,30 @@ def client(app):
         yield c
 
 
-class FakeRT:
-    """Stands in for openai_realtime.RealtimeClient — no network.
+class FakeLive:
+    """Stands in for gemini_live.GeminiLiveClient — no network.
 
     Both setup (key probe) and routes (/rt/session mint) construct the client
-    via the `openai_realtime` module attribute, so one patch covers both.
+    via the `gemini_live` module attribute, so one patch covers both.
     """
 
-    instances: list["FakeRT"] = []
-    fail_mint = False           # raise RealtimeError from mint_client_secret
-    minted: list[dict] = []     # recorded session configs
+    instances: list["FakeLive"] = []
+    fail_mint = False           # raise RealtimeError from mint_token
+    minted: list[dict] = []     # recorded full {"setup": …} messages
 
     def __init__(self, api_key: str | None = None, **kw):
         self.api_key = api_key
         self.kwargs = kw
         self.closed = False
-        FakeRT.instances.append(self)
+        FakeLive.instances.append(self)
 
-    async def mint_client_secret(self, session: dict):
-        if FakeRT.fail_mint:
-            from plugin_voice.openai_realtime import RealtimeError
+    async def mint_token(self, setup: dict, *, uses: int | None = None):
+        if FakeLive.fail_mint:
+            from plugin_voice.gemini_live import RealtimeError
 
-            raise RealtimeError("OpenAI rejected the key (HTTP 401) — check it in Settings → Voice")
-        FakeRT.minted.append(session)
-        return {"value": "ek_test_secret", "expires_at": 4102444800, "session": session}
+            raise RealtimeError("Google rejected the key (HTTP 401) — check it in Settings → Voice")
+        FakeLive.minted.append(setup)
+        return {"name": "auth_tokens/test-token", "expire_time": "2099-01-01T00:00:00Z"}
 
     async def close(self):
         self.closed = True
@@ -242,12 +242,12 @@ class FakeRT:
 
 @pytest.fixture(autouse=True)
 def _patch_realtime(monkeypatch):
-    from plugin_voice import openai_realtime as rt_module
+    from plugin_voice import gemini_live as live_module
 
-    FakeRT.instances = []
-    FakeRT.fail_mint = False
-    FakeRT.minted = []
-    monkeypatch.setattr(rt_module, "RealtimeClient", FakeRT)
+    FakeLive.instances = []
+    FakeLive.fail_mint = False
+    FakeLive.minted = []
+    monkeypatch.setattr(live_module, "GeminiLiveClient", FakeLive)
     # a developer's real key must never leak into the resolve chain under test
-    monkeypatch.delenv("LUNA_OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LUNA_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)

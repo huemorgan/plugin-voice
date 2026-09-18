@@ -1,5 +1,5 @@
-"""Plan 002/005 features: recognizer, enrollment, personality, live check,
-gateway keys, agent tools — against the 0.5.0 OpenAI Realtime surface."""
+"""Plan 002/005/007 features: recognizer, enrollment, personality, live check,
+env keys, agent tools — against the 0.8.0 Gemini Live surface."""
 
 from __future__ import annotations
 
@@ -252,42 +252,26 @@ def test_ui_carries_new_affordances(client):
     assert "Luna is speaking" not in widget_html
 
 
-# ---------------------------------------------------------- 0.2.3 gateway keys
+# ------------------------------------------------------------- 0.8.0 env keys
 
 
-def test_status_detects_gateway_key_without_pasted_key(client, ctx):
-    import sys
-
-    sdk = sys.modules["luna_sdk"]
-    ctx.vault.gateway_connection = sdk.Connection(
-        base_url="https://gw.example.com/proxy/openai",
-        secret="devtok",
-        auth=sdk.AuthSpec(location="header", name="Authorization", scheme="Bearer"),
-        source="virtual",
-    )
+def test_status_detects_env_key_without_pasted_key(client, ctx, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gk-env")
     st = client.get(f"{API}/status").json()
-    assert st["connected"] is True and st["key_source"] == "gateway"
+    assert st["connected"] is True and st["key_source"] == "env"
     # status probed the key with a real mint before claiming it works
     assert st["ready"] is True and st["key_error"] is None
 
 
-def test_status_key_resolves_but_cannot_mint(client, ctx):
-    """The hosted-tenant case: the gateway key resolves, so it looks
-    'connected', but realtime minting 402s — status must not claim ready."""
-    import sys
+def test_status_key_resolves_but_cannot_mint(client, ctx, monkeypatch):
+    """A restricted/revoked key still resolves, so it looks 'connected', but
+    token minting fails — status must not claim ready."""
+    from tests.conftest import FakeLive
 
-    from tests.conftest import FakeRT
-
-    sdk = sys.modules["luna_sdk"]
-    ctx.vault.gateway_connection = sdk.Connection(
-        base_url="https://gw.example.com/proxy/openai",
-        secret="devtok",
-        auth=sdk.AuthSpec(location="header", name="Authorization", scheme="Bearer"),
-        source="virtual",
-    )
-    FakeRT.fail_mint = True
+    monkeypatch.setenv("GEMINI_API_KEY", "gk-env")
+    FakeLive.fail_mint = True
     st = client.get(f"{API}/status").json()
-    assert st["connected"] is True and st["key_source"] == "gateway"
+    assert st["connected"] is True and st["key_source"] == "env"
     assert st["ready"] is False
     assert "check it in Settings" in st["key_error"]
 
@@ -305,29 +289,19 @@ def test_settings_page_keys_readiness_on_probe_not_resolution(client):
     assert "Voice can't start with" in html
 
 
-def test_connect_without_key_uses_gateway_connection(client, ctx):
-    import sys
+def test_connect_without_key_uses_env_key(client, ctx, monkeypatch):
+    from plugin_voice import VAULT_GEMINI_KEY
+    from tests.conftest import FakeLive
 
-    from plugin_voice import VAULT_OPENAI_KEY
-    from tests.conftest import FakeRT
-
-    sdk = sys.modules["luna_sdk"]
-    ctx.vault.gateway_connection = sdk.Connection(
-        base_url="https://gw.example.com/proxy/openai",
-        secret="devtok",
-        auth=sdk.AuthSpec(location="header", name="Authorization", scheme="Bearer"),
-        source="virtual",
-    )
+    monkeypatch.setenv("GEMINI_API_KEY", "gk-env")
     resp = client.post(f"{API}/connect", json={})
     assert resp.status_code == 200, resp.text
     st = resp.json()
-    assert st["connected"] is True and st["key_source"] == "gateway"
-    # nothing stored as the owner's own key — the gateway stays the source
-    assert VAULT_OPENAI_KEY not in ctx.vault.data
-    # the probe went through the gateway's auth, not a bare api_key
-    probe = FakeRT.instances[0]
-    assert probe.api_key is None
-    assert probe.kwargs["headers"]["Authorization"] == "Bearer devtok"
+    assert st["connected"] is True and st["key_source"] == "env"
+    # nothing stored as the owner's own key — the env stays the source
+    assert VAULT_GEMINI_KEY not in ctx.vault.data
+    # the probe used the env key
+    assert FakeLive.instances[0].api_key == "gk-env"
 
 
 def test_connect_without_any_key_still_friendly_400(client):
@@ -336,25 +310,20 @@ def test_connect_without_any_key_still_friendly_400(client):
     assert isinstance(resp.json()["detail"], str)
 
 
-def test_resolve_uses_openai_slug(client, ctx):
+def test_resolve_never_uses_the_gateway(client, ctx):
+    """007 removed the vault.connect/gateway lane on purpose: ephemeral token
+    minting authenticates directly against Google, which a gateway virtual key
+    cannot do. A wired gateway connection must NOT make status 'connected'."""
     import sys
 
     sdk = sys.modules["luna_sdk"]
-    calls = []
-    conn = sdk.Connection(
-        base_url="https://gw/proxy/openai", secret="tok",
+    ctx.vault.gateway_connection = sdk.Connection(
+        base_url="https://gw/proxy/gemini", secret="tok",
         auth=sdk.AuthSpec(location="header", name="Authorization", scheme="Bearer"),
         source="virtual",
     )
-
-    async def connect(slug, *, upstream_default, auth=None, credential_name=None):
-        calls.append(slug)
-        return conn if slug == "openai" else None
-
-    ctx.vault.connect = connect
     st = client.get(f"{API}/status").json()
-    assert st["connected"] is True and st["key_source"] == "gateway"
-    assert calls == ["openai"]
+    assert st["connected"] is False and st["key_source"] is None
 
 
 def test_settings_page_gates_cards_until_ready(client):
@@ -393,17 +362,11 @@ def test_agent_tools_registered_with_honest_policies(ctx):
     assert "api_key" not in json.dumps(out)
 
 
-def test_voice_connect_tool_completes_setup_after_gateway_grant(ctx):
-    """The chat flow: agent wires the gateway key, then voice_connect finishes."""
+def test_voice_connect_tool_completes_setup_with_env_key(ctx, monkeypatch):
+    """The chat flow: a key exists in the environment, voice_connect finishes."""
     import asyncio
-    import sys
 
-    sdk = sys.modules["luna_sdk"]
-    ctx.vault.gateway_connection = sdk.Connection(
-        base_url="https://gw/proxy/openai", secret="tok",
-        auth=sdk.AuthSpec(location="header", name="Authorization", scheme="Bearer"),
-        source="virtual",
-    )
+    monkeypatch.setenv("GEMINI_API_KEY", "gk-env")
 
     from plugin_voice import VoicePlugin
 
@@ -420,7 +383,7 @@ def test_voice_connect_tool_completes_setup_after_gateway_grant(ctx):
 
     out = asyncio.run(reg_calls["voice_connect"]())
     assert out.get("connected") is True, out
-    assert out.get("key_source") == "gateway"
+    assert out.get("key_source") == "env"
 
 
 def test_voice_connect_tool_without_any_key_is_friendly(ctx):
@@ -445,4 +408,4 @@ def test_voice_connect_tool_without_any_key_is_friendly(ctx):
 def test_settings_page_hides_paste_input_by_default(client):
     html = client.get(f"{API}/ui/settings/").text
     assert '<div id="paste-block" style="display:none">' in html
-    assert "OpenAI" in html
+    assert "Gemini" in html and "OpenAI" not in html

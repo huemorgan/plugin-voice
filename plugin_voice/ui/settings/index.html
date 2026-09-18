@@ -95,15 +95,15 @@
   document.getElementById("tab-persona").href = "persona/" + location.search;
 </script>
 <h2>Voice — realtime speech, your agent's persona</h2>
-<p class="hint">Speech-to-speech runs on an OpenAI Realtime key: the voice speaks AS your agent,
-quick lookups happen in-call, and real work is handed to your agent in the background. If the
-platform already provides an OpenAI key, setup is one click — otherwise paste your own.</p>
+<p class="hint">Speech-to-speech runs on Gemini Live with a Google AI key: the voice speaks AS your
+agent, quick lookups happen in-call, and real work is handed to your agent in the background. If the
+platform already provides a Gemini key, setup is one click — otherwise paste your own.</p>
 
 <div class="card" id="connect-card">
   <strong id="conn-status" data-testid="voice-conn-status">Checking…</strong>
   <div id="paste-block" style="display:none">
-    <label>OpenAI API key</label>
-    <input id="api-key" data-testid="voice-api-key" type="password" placeholder="sk-…" autocomplete="off" />
+    <label>Google AI (Gemini) API key</label>
+    <input id="api-key" data-testid="voice-api-key" type="password" placeholder="AIza…" autocomplete="off" />
     <button id="connect" data-testid="voice-connect">Connect</button>
   </div>
   <div class="btn-row">
@@ -175,7 +175,7 @@ platform already provides an OpenAI key, setup is one click — otherwise paste 
     return body;
   }
 
-  var SOURCE_LABEL = { own: "your own OpenAI API key", vault: "the OpenAI key in your Key Vault", gateway: "the platform's OpenAI gateway key", env: "the platform-provided OpenAI key" };
+  var SOURCE_LABEL = { own: "your pasted Gemini key", env: "the platform-provided Gemini key" };
 
   function gateCards(ready) {
     // sections below need a working key — request:
@@ -187,8 +187,8 @@ platform already provides an OpenAI key, setup is one click — otherwise paste 
 
   function renderStatus(s) {
     // "connected" means a key resolves; "ready" means it actually minted a
-    // realtime session. Hosted gateway keys resolve but can't mint — the
-    // paste field must stay reachable whenever the key doesn't work.
+    // Gemini session token. A key that resolves but can't mint (revoked,
+    // wrong product) keeps the paste field reachable.
     var ready = !!s.ready;
     $("paste-block").style.display = ready ? "none" : "block";
     if (ready) {
@@ -198,7 +198,7 @@ platform already provides an OpenAI key, setup is one click — otherwise paste 
     } else if (s.connected) {
       $("conn-status").textContent = "Voice can't start with " + (SOURCE_LABEL[s.key_source] || "the detected key");
       $("conn-status").className = "status-err";
-      msg($("msg"), s.key_error || "The detected key can't mint a realtime session — paste your own OpenAI key below.", false);
+      msg($("msg"), s.key_error || "The detected key can't start a Gemini Live session — paste your own Google AI key below.", false);
     } else {
       $("conn-status").textContent = "Not connected";
       $("conn-status").className = "status-err";
@@ -235,13 +235,13 @@ platform already provides an OpenAI key, setup is one click — otherwise paste 
   }
 
   async function refresh() {
-    $("conn-status").textContent = "Checking for an OpenAI key…";
+    $("conn-status").textContent = "Checking for a Gemini key…";
     $("conn-status").className = "";
     try {
       var s = await call("/status");
       renderStatus(s);
       if (s.ready) { await loadVoices(s); }
-      // no pasted key yet but a WORKING vault/gateway/env key exists → the
+      // no pasted key yet but a WORKING env key exists → the
       // connect button just blesses it (validates + fetches the persona)
       var external = s.ready && s.key_source && s.key_source !== "own" && !s.persona_name;
       $("connect-gateway").style.display = external ? "inline-block" : "none";

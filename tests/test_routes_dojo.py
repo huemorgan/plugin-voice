@@ -3,7 +3,7 @@
 These answer the two questions the plan cares about most:
 1. **Is the widget there?** — the manifest declares it AND the declared URL
    actually serves the visualization page with its controls.
-2. **Is it configurable?** — connect stores the OpenAI key in the VAULT
+2. **Is it configurable?** — connect stores the Gemini key in the VAULT
    (never anywhere else), the voice/model pickers round-trip through
    /settings, and the selected voice reaches the session the widget consumes.
 """
@@ -14,16 +14,16 @@ import json
 
 import pytest
 
-from plugin_voice import VAULT_OPENAI_KEY, VAULT_SETTINGS
-from plugin_voice import openai_realtime
+from plugin_voice import VAULT_GEMINI_KEY, VAULT_SETTINGS
+from plugin_voice import gemini_live
 
-from tests.conftest import FakeRT  # noqa: E402 — shared fake, autouse-patched
+from tests.conftest import FakeLive  # noqa: E402 — shared fake, autouse-patched
 
 API = "/api/p/plugin-voice"
 
 
 def _connect(client, **extra):
-    resp = client.post(f"{API}/connect", json={"api_key": "sk_test_not_real", **extra})
+    resp = client.post(f"{API}/connect", json={"api_key": "gk_test_not_real", **extra})
     assert resp.status_code == 200, resp.text
     return resp.json()
 
@@ -89,22 +89,22 @@ def test_static_serving_blocks_path_traversal(client):
 
 
 def test_connect_stores_key_in_vault_only(client, ctx):
-    """One pasted OpenAI key is all the owner provides."""
+    """One pasted Gemini key is all the owner provides."""
     status = _connect(client)
     assert status["connected"] is True
     assert status["key_source"] == "own"
-    assert ctx.vault.data[VAULT_OPENAI_KEY] == "sk_test_not_real"
-    # the probe minted a throwaway client secret with the pasted key
-    assert FakeRT.instances and FakeRT.instances[0].api_key == "sk_test_not_real"
+    assert ctx.vault.data[VAULT_GEMINI_KEY] == "gk_test_not_real"
+    # the probe minted a throwaway ephemeral token with the pasted key
+    assert FakeLive.instances and FakeLive.instances[0].api_key == "gk_test_not_real"
     # and the key value never appears in the response body
-    assert "sk_test_not_real" not in json.dumps(status)
+    assert "gk_test_not_real" not in json.dumps(status)
 
 
 def test_connect_rejects_bad_key(client, ctx):
-    FakeRT.fail_mint = True
-    resp = client.post(f"{API}/connect", json={"api_key": "sk_bad"})
+    FakeLive.fail_mint = True
+    resp = client.post(f"{API}/connect", json={"api_key": "gk_bad"})
     assert resp.status_code == 400
-    assert VAULT_OPENAI_KEY not in ctx.vault.data  # nothing stored on failure
+    assert VAULT_GEMINI_KEY not in ctx.vault.data  # nothing stored on failure
 
 
 def test_connect_blank_key_yields_string_error_not_422(client):
@@ -119,12 +119,12 @@ def test_voice_settings_round_trip(client, ctx):
     _connect(client)
     base = client.get(f"{API}/settings").json()
 
-    resp = client.post(f"{API}/settings", json={"rt_voice": "cedar"})
-    assert resp.status_code == 200 and resp.json()["rt_voice"] == "cedar"
+    resp = client.post(f"{API}/settings", json={"rt_voice": "Kore"})
+    assert resp.status_code == 200 and resp.json()["rt_voice"] == "Kore"
 
     # persisted (vault-backed KV), visible on re-read
-    assert client.get(f"{API}/settings").json()["rt_voice"] == "cedar"
-    assert json.loads(ctx.vault.data[VAULT_SETTINGS])["rt_voice"] == "cedar"
+    assert client.get(f"{API}/settings").json()["rt_voice"] == "Kore"
+    assert json.loads(ctx.vault.data[VAULT_SETTINGS])["rt_voice"] == "Kore"
 
     # clearing works
     client.post(f"{API}/settings", json={"rt_voice": None})
@@ -138,29 +138,31 @@ def test_settings_reject_unknown_voice_and_model(client):
 
 def test_model_and_broker_knobs_round_trip(client, ctx):
     client.post(f"{API}/settings", json={
-        "rt_model": "gpt-realtime-2.1-mini",
+        "rt_model": "gemini-3.8-live-extended-thinking",
         "rt_lock_tools_to_owner": True,
         "rt_tools_allow": ["goal_list", " ", ""],
     })
     stored = json.loads(ctx.vault.data[VAULT_SETTINGS])
-    assert stored["rt_model"] == "gpt-realtime-2.1-mini"
+    assert stored["rt_model"] == "gemini-3.8-live-extended-thinking"
     assert stored["rt_lock_tools_to_owner"] is True
     assert stored["rt_tools_allow"] == ["goal_list"]  # blanks dropped
 
 
 def test_voices_endpoint_is_the_static_catalog(client):
     data = client.get(f"{API}/voices").json()
-    assert {v["voice_id"] for v in data["voices"]} == set(openai_realtime.VOICE_IDS)
-    assert set(data["models"]) == set(openai_realtime.MODELS)
+    assert {v["voice_id"] for v in data["voices"]} == set(gemini_live.VOICE_IDS)
+    assert set(data["models"]) == set(gemini_live.MODELS)
 
 
 def test_selected_voice_reaches_the_session_the_widget_consumes(client, ctx):
     _connect(client)
-    client.post(f"{API}/settings", json={"rt_voice": "cedar"})
+    client.post(f"{API}/settings", json={"rt_voice": "Kore"})
     # GET: the widget iframe only has cookie (read-only) auth
     session = client.get(f"{API}/rt/session").json()
-    assert session["voice"] == "cedar"
-    assert FakeRT.minted[-1]["audio"]["output"]["voice"] == "cedar"
+    assert session["voice"] == "Kore"
+    minted_voice = FakeLive.minted[-1]["setup"]["generationConfig"][
+        "speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"]
+    assert minted_voice == "Kore"
 
 
 def test_session_requires_setup(client):
@@ -173,7 +175,7 @@ def test_status_reflects_disconnect(client, ctx):
     client.post(f"{API}/disconnect")
     status = client.get(f"{API}/status").json()
     assert status["connected"] is False
-    assert VAULT_OPENAI_KEY not in ctx.vault.data
+    assert VAULT_GEMINI_KEY not in ctx.vault.data
 
 
 def test_disconnect_purges_legacy_elevenlabs_vault_keys(client, ctx):

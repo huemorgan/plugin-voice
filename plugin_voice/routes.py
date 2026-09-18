@@ -25,24 +25,26 @@ from luna_sdk import get_current_user
 from fastapi import WebSocket, WebSocketDisconnect
 
 from . import (
+    VAULT_GEMINI_KEY,
     VAULT_OPENAI_KEY,
     VAULT_SETTINGS,
     broker,
+    gemini_live,
     identity,
-    openai_realtime,
     persona_config,
     setup,
     talker,
     tasks,
 )
-from .openai_realtime import RealtimeError
+from .gemini_live import RealtimeError
 from . import state as live_state
 
 VAULT_PROFILE = "plugin_voice.voice_profile"
 
-# Pre-0.5.0 (ElevenLabs era) vault entries — deleted on disconnect so a
-# migrated install leaves nothing behind.
+# Earlier-era vault entries (ElevenLabs pre-0.5.0, OpenAI pre-0.8.0) —
+# deleted on disconnect so a migrated install leaves nothing behind.
 LEGACY_VAULT_KEYS = (
+    VAULT_OPENAI_KEY,
     "plugin_voice.elevenlabs_api_key",
     "plugin_voice.agent_id",
     "plugin_voice.bridge_secret",
@@ -157,7 +159,7 @@ def register_routes(app, ctx):
     @router.post("/disconnect")
     async def disconnect(user=Depends(get_current_user)):
         vault = _vault()
-        for key in (VAULT_OPENAI_KEY, *LEGACY_VAULT_KEYS):
+        for key in (VAULT_GEMINI_KEY, *LEGACY_VAULT_KEYS):
             try:
                 await vault.delete_credential(key)
             except KeyError:
@@ -173,8 +175,8 @@ def register_routes(app, ctx):
 
     @router.get("/voices")
     async def voices(user=Depends(get_current_user)):
-        # The Realtime voice set is fixed — a static catalog, no upstream call.
-        return {"voices": openai_realtime.VOICES, "models": list(openai_realtime.MODELS)}
+        # The Gemini prebuilt voice set is fixed — a static catalog, no upstream call.
+        return {"voices": gemini_live.VOICES, "models": list(gemini_live.MODELS)}
 
     @router.get("/settings")
     async def get_settings(user=Depends(get_current_user)):
@@ -186,12 +188,12 @@ def register_routes(app, ctx):
         settings = await _settings()
         if "rt_voice" in changes:
             voice = (changes["rt_voice"] or "").strip() or None
-            if voice and voice not in openai_realtime.VOICE_IDS:
+            if voice and voice not in gemini_live.VOICE_IDS:
                 raise HTTPException(400, f"Unknown voice '{voice}'")
             settings["rt_voice"] = voice
         if "rt_model" in changes:
             model = (changes["rt_model"] or "").strip() or None
-            if model and model not in openai_realtime.MODELS:
+            if model and model not in gemini_live.MODELS:
                 raise HTTPException(400, f"Unknown model '{model}'")
             settings["rt_model"] = model
         if "rt_lock_tools_to_owner" in changes:
@@ -237,9 +239,9 @@ def register_routes(app, ctx):
     @router.get("/rt/session")
     @router.post("/rt/session")
     async def rt_session(user=Depends(get_current_user)):
-        key_res = await openai_realtime.resolve_openai_key(ctx, vault_key=VAULT_OPENAI_KEY)
+        key_res = await gemini_live.resolve_gemini_key(ctx, vault_key=VAULT_GEMINI_KEY)
         if key_res is None:
-            raise HTTPException(400, "No OpenAI key — add one in Settings → Voice")
+            raise HTTPException(400, "No Gemini key — add one in Settings → Voice")
 
         settings = await _settings()
         pv = persona_config.effective(settings)
@@ -264,9 +266,16 @@ def register_routes(app, ctx):
 
         lane2 = broker.knowledge_tools(ctx, settings)
         tools = broker.tool_schemas(lane2) + tasks.synthetic_schemas() + [_VIEW_REACT_SCHEMA]
-        model = settings.get("rt_model") or openai_realtime.DEFAULT_MODEL
-        voice = settings.get("rt_voice") or openai_realtime.DEFAULT_VOICE
-        session_cfg = openai_realtime.session_config(
+        # Unknown stored values (e.g. OpenAI-era leftovers after the 0.8.0
+        # migration) fall back to defaults here — a stale setting must never
+        # make the call button dead-end. Saving stays strict (400 above).
+        model = settings.get("rt_model")
+        if model not in gemini_live.MODELS:
+            model = gemini_live.DEFAULT_MODEL
+        voice = settings.get("rt_voice")
+        if voice not in gemini_live.VOICE_IDS:
+            voice = gemini_live.DEFAULT_VOICE
+        setup_msg = gemini_live.setup_message(
             instructions=instructions,
             voice=voice,
             model=model,
@@ -274,18 +283,15 @@ def register_routes(app, ctx):
             turn_eagerness=pv.get("turn_eagerness") or "normal",
         )
 
-        rt_client = openai_realtime.RealtimeClient(**{
-            k: v for k, v in key_res.items()
-            if k in ("api_key", "base_url", "headers", "params") and v
-        })
+        client = gemini_live.GeminiLiveClient(key_res["api_key"])
         try:
-            minted = await rt_client.mint_client_secret(session_cfg)
+            minted = await client.mint_token(setup_msg)
         except RealtimeError as exc:
             # 400, not 502: hosted edges replace 5xx JSON bodies with HTML
             # error pages, which hides the actionable message from the widget.
             raise HTTPException(400, str(exc)) from exc
         finally:
-            await rt_client.close()
+            await client.close()
 
         # One plugin token arms every relay surface for this call (/rt/tool,
         # /rt/events, /live) — realtime calls outlast the 5-minute live TTL.
@@ -293,11 +299,15 @@ def register_routes(app, ctx):
         live_state.mint_live_token(rt_token, ttl=live_state.RT_TOKEN_TTL)
         live_state.reset_speaker()
         return {
-            "client_secret": minted["value"],
-            "expires_at": minted.get("expires_at"),
-            "webrtc_url": openai_realtime.WEBRTC_CALLS_URL,
-            "model": session_cfg["model"],
-            "voice": session_cfg["audio"]["output"]["voice"],
+            # The browser connects `ws_url?access_token=…` and sends `setup`
+            # VERBATIM as its first frame — it must byte-match the token's
+            # server-locked constraint, so the server hands it over whole.
+            "access_token": minted["name"],
+            "expires_at": minted.get("expire_time"),
+            "ws_url": gemini_live.LIVE_WS_URL,
+            "setup": setup_msg,
+            "model": model,
+            "voice": voice,
             "rt_token": rt_token,
             "live_token": rt_token if has_imprint else None,
             "persona_name": persona_name,

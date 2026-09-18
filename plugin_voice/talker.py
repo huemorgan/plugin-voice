@@ -33,6 +33,21 @@ QUIET_RULES = (
     "response. Say nothing at all until they address you again."
 )
 
+# Noisy-room demeanor — Gemini Live barge-in flushes playback on any detected
+# speech start, so false interruptions (beeps, coughs, a dog) WILL sometimes cut
+# the audio. What the model must not do is treat every cut as a conversation
+# event: no restarting from the top, no meta-commentary, no going silent.
+NOISE_RULES = (
+    "Interruptions and noise, handled like a person would: if you get cut off "
+    "mid-sentence by a stray sound that wasn't really the owner talking to you, "
+    "pick up naturally where you left off — finish the thought, don't restart "
+    "the whole sentence and don't comment on being interrupted. If the owner "
+    "genuinely starts speaking, stop immediately and listen. Never acknowledge "
+    "background noises (beeps, typing, doors, coughs) out loud, never ask "
+    "'what was that?', and never go quiet just because the room is noisy — "
+    "only a real request for silence makes you stop talking."
+)
+
 LANE_RULES = (
     "How you work — three strict rules:\n"
     "1. FACTS: anything about the owner's world (their files, notes, memory, "
@@ -111,12 +126,13 @@ def build_instructions(
     mission: str | None = None,
 ) -> str:
     """The full lane-1 system prompt: identity (+ real personality/mission) →
-    lane rules → silence discipline → style → open mic → owner extras (last, so
-    they win on conflict)."""
+    lane rules → silence discipline → noise/interruption demeanor → style →
+    open mic → owner extras (last, so they win on conflict)."""
     parts = [
         _persona_block(persona_name, greeting, fillers, persona_brief, mission),
         LANE_RULES,
         QUIET_RULES,
+        NOISE_RULES,
         (voice_style or "").strip() or VOICE_STYLE,
     ]
     if has_imprint:

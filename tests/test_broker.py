@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from plugin_voice import VAULT_OPENAI_KEY, broker
+from plugin_voice import VAULT_GEMINI_KEY, broker
 from plugin_voice.broker import execute, knowledge_tools, tool_schemas
 
 from .conftest import _RegisteredTool
@@ -190,21 +190,10 @@ async def test_owner_deny_applies_at_call_time(ctx):
 # ---------------------------------------------------------------- /rt/tool
 
 
-class FakeRT:
-    def __init__(self, api_key=None, **kw): ...
-
-    async def mint_client_secret(self, session):
-        return {"value": "ek_test", "expires_at": 42, "session": session}
-
-    async def close(self): ...
-
-
 @pytest.fixture()
-def rt_token(client, ctx, monkeypatch):
-    from plugin_voice import openai_realtime
-
-    monkeypatch.setattr(openai_realtime, "RealtimeClient", FakeRT)
-    ctx.vault.data[VAULT_OPENAI_KEY] = "sk-own"
+def rt_token(client, ctx):
+    # minting is faked by conftest's autouse GeminiLiveClient patch
+    ctx.vault.data[VAULT_GEMINI_KEY] = "gk-own"
     return client.get("/api/p/plugin-voice/rt/session").json()["rt_token"]
 
 

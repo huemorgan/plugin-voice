@@ -1,15 +1,13 @@
 """Shared connection/setup flow — used by BOTH the HTTP routes and the agent
 tools, so the owner can finish setup from Settings or just by asking in chat.
 
-Key resolution (see ``openai_realtime.resolve_openai_key``):
+Key resolution (see ``gemini_live.resolve_gemini_key``):
 1. the owner's own pasted key (this plugin's vault entry)
-2. a granted vault credential or the hosting gateway's virtual key via
-   ``ctx.vault.connect("openai", ...)``
-3. env vars (``LUNA_OPENAI_API_KEY`` / ``OPENAI_API_KEY``)
+2. env vars (``LUNA_GEMINI_API_KEY`` / ``GEMINI_API_KEY``)
 
 The secret value never passes through the agent: tools trigger this module and
 the resolution happens server-side. Connecting probes the key by minting a
-throwaway Realtime client secret — the same call every real session uses.
+throwaway Live session token — the same call every real session makes.
 """
 
 from __future__ import annotations
@@ -19,14 +17,14 @@ import logging
 from typing import Any
 
 from . import (
-    VAULT_OPENAI_KEY,
+    VAULT_GEMINI_KEY,
     VAULT_SETTINGS,
+    gemini_live,
     identity,
-    openai_realtime,
     persona_config,
     personality,
 )
-from .openai_realtime import RealtimeError
+from .gemini_live import RealtimeError
 
 log = logging.getLogger("plugin-voice.setup")
 
@@ -72,10 +70,9 @@ async def build_status(ctx: Any) -> dict:
     from . import routes as _routes  # VAULT_PROFILE lives there
 
     settings = await settings_of(ctx)
-    key_res = await openai_realtime.resolve_openai_key(ctx, vault_key=VAULT_OPENAI_KEY)
-    # A key that resolves is not a key that works: hosted gateway keys 402 on
-    # realtime minting (billing can't meter WebRTC audio), so status probes
-    # with the same call real sessions make and reports ready/key_error
+    key_res = await gemini_live.resolve_gemini_key(ctx, vault_key=VAULT_GEMINI_KEY)
+    # A key that resolves is not a key that works (restricted or revoked keys
+    # still resolve), so status probes the API and reports ready/key_error
     # separately from connected.
     ready = False
     key_error = None
@@ -89,13 +86,16 @@ async def build_status(ctx: Any) -> dict:
     # greeting was generated for and goes stale on rename.
     live = await identity.live_name(ctx)
     eff = persona_config.effective(settings)
+    rt_model = settings.get("rt_model")
+    if rt_model not in gemini_live.MODELS:
+        rt_model = gemini_live.DEFAULT_MODEL  # incl. stale OpenAI-era values
     return {
         "connected": key_res is not None,
         "ready": ready,
         "key_error": key_error,
         "key_source": (key_res or {}).get("source"),
         "rt_voice": settings.get("rt_voice"),
-        "rt_model": settings.get("rt_model") or openai_realtime.DEFAULT_MODEL,
+        "rt_model": rt_model,
         "persona_name": live or settings.get("persona_name"),
         "greeting": eff.get("greeting"),
         "fillers": eff.get("fillers"),
@@ -103,21 +103,14 @@ async def build_status(ctx: Any) -> dict:
     }
 
 
-def _probe_client(key_res: dict) -> openai_realtime.RealtimeClient:
-    kwargs = {
-        k: v for k, v in key_res.items()
-        if k in ("api_key", "base_url", "headers", "params") and v
-    }
-    return openai_realtime.RealtimeClient(**kwargs)
-
-
 async def _validate_key(key_res: dict) -> None:
-    """Mint (and discard) a client secret — the exact call sessions make, so a
-    key that passes here works for real. Raises SetupError on any failure."""
-    probe = _probe_client(key_res)
+    """Mint (and discard) an ephemeral Live token — the exact call sessions
+    make, so a key that passes here works for real. Raises SetupError on any
+    failure."""
+    probe = gemini_live.GeminiLiveClient(key_res["api_key"])
     try:
-        await probe.mint_client_secret(
-            openai_realtime.session_config(instructions="Connection check.")
+        await probe.mint_token(
+            gemini_live.setup_message(instructions="Connection check."), uses=1
         )
     except RealtimeError as exc:
         raise SetupError(str(exc)) from exc
@@ -136,22 +129,24 @@ async def do_connect(ctx: Any, *, pasted_key: str | None = None) -> dict:
     if pasted:
         key_res: dict | None = {"api_key": pasted, "source": "own"}
     else:
-        key_res = await openai_realtime.resolve_openai_key(ctx, vault_key=VAULT_OPENAI_KEY)
+        key_res = await gemini_live.resolve_gemini_key(ctx, vault_key=VAULT_GEMINI_KEY)
         if key_res is None:
             raise SetupError(
-                "No OpenAI key found — paste one in Settings → Voice, or "
-                "connect the openai gateway key first"
+                "No Gemini key found — paste a Google AI API key in "
+                "Settings → Voice"
             )
     await _validate_key(key_res)
     if pasted:
-        await vault_of(ctx).store_credential(VAULT_OPENAI_KEY, pasted, kind="api_key")
+        await vault_of(ctx).store_credential(VAULT_GEMINI_KEY, pasted, kind="api_key")
 
     settings = await settings_of(ctx)
     persona = await personality.fetch_persona(ctx)
-    voice = settings.get("rt_voice")  # an explicit owner choice wins
+    voice = settings.get("rt_voice")  # an explicit owner choice wins…
+    if voice not in gemini_live.VOICE_IDS:
+        voice = None  # …unless it's an OpenAI-era name Gemini doesn't know
     if not voice and persona.get("voice_description"):
         voice = await personality.pick_voice(
-            ctx, openai_realtime.VOICES, persona["voice_description"]
+            ctx, gemini_live.VOICES, persona["voice_description"]
         )
     settings.update({
         "persona_name": persona.get("name"),
@@ -173,7 +168,7 @@ async def resync_persona(ctx: Any) -> dict:
     voice = None
     if persona.get("voice_description"):
         voice = await personality.pick_voice(
-            ctx, openai_realtime.VOICES, persona["voice_description"]
+            ctx, gemini_live.VOICES, persona["voice_description"]
         )
     settings.update({
         # Fall back to the live identity name so a failed persona fetch still

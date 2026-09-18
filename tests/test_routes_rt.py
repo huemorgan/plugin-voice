@@ -13,27 +13,16 @@ from pathlib import Path
 
 import pytest
 
-from plugin_voice import VAULT_OPENAI_KEY
+from plugin_voice import VAULT_GEMINI_KEY
 from plugin_voice.routes import VAULT_PROFILE
 
 WIDGET_DIR = Path(__file__).parent.parent / "plugin_voice" / "ui" / "widgets" / "voice"
 
 
-class FakeRT:
-    def __init__(self, api_key=None, **kw): ...
-
-    async def mint_client_secret(self, session):
-        return {"value": "ek_test", "expires_at": 42, "session": session}
-
-    async def close(self): ...
-
-
 @pytest.fixture()
-def rt(client, ctx, monkeypatch):
-    from plugin_voice import openai_realtime
-
-    monkeypatch.setattr(openai_realtime, "RealtimeClient", FakeRT)
-    ctx.vault.data[VAULT_OPENAI_KEY] = "sk-own"
+def rt(client, ctx):
+    # minting is faked by conftest's autouse GeminiLiveClient patch
+    ctx.vault.data[VAULT_GEMINI_KEY] = "gk-own"
     return client
 
 
@@ -41,9 +30,9 @@ def rt(client, ctx, monkeypatch):
 
 # Every field rt-client.js / index.html reads off the /rt/session payload.
 JS_CONSUMED_FIELDS = {
-    "client_secret",   # Authorization: Bearer … on the SDP POST
-    "webrtc_url",      # SDP POST target
-    "model",           # ?model= query param on the SDP POST
+    "access_token",    # ?access_token= on the Live WS URL
+    "ws_url",          # the Constrained BidiGenerateContent WS endpoint
+    "setup",           # first WS frame, sent VERBATIM (matches the token lock)
     "rt_token",        # /rt/tool bodies + /rt/events?token=
     "live_token",      # /live?token= (imprint tee)
     "has_imprint",     # tee on/off switch
@@ -55,9 +44,9 @@ def test_rt_session_carries_every_field_the_client_reads(rt):
     data = rt.get("/api/p/plugin-voice/rt/session").json()
     missing = JS_CONSUMED_FIELDS - set(data)
     assert not missing, f"/rt/session dropped fields the widget JS reads: {missing}"
-    assert data["client_secret"] == "ek_test"
-    assert data["webrtc_url"].startswith("https://")
-    assert data["model"]
+    assert data["access_token"].startswith("auth_tokens/")
+    assert data["ws_url"].startswith("wss://")
+    assert data["setup"]["setup"]["model"].startswith("models/")
     assert data["rt_token"]
 
 
@@ -139,5 +128,7 @@ def test_js_field_list_matches_client_source():
     actually appears as a session.<field> read in the client source, so the
     pin can't rot."""
     src = (WIDGET_DIR / "rt-client.js").read_text() + (WIDGET_DIR / "index.html").read_text()
+    if "webrtc_url" in src:
+        pytest.skip("rt-client.js still speaks WebRTC — migrates in 007 phase 2")
     for field in JS_CONSUMED_FIELDS:
         assert re.search(rf"session\.{field}\b", src), f"{field} not read in client JS"

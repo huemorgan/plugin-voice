@@ -224,7 +224,7 @@
   async function start() {
     // `call` is only assigned after a multi-second await (fetch + mic + SDP);
     // the synchronous `starting` latch closes that window so a double-tap or a
-    // pane race can't spin up a second, independent OpenAI session (which would
+    // pane race can't spin up a second, independent Gemini session (which would
     // greet twice and answer every turn from scratch — the "repeats itself,
     // surprised the second time" bug).
     if (call || starting) { return; }

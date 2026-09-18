@@ -14,7 +14,7 @@ import anyio
 import pytest
 
 from plugin_voice import (
-    VAULT_OPENAI_KEY,
+    VAULT_GEMINI_KEY,
     VAULT_SETTINGS,
     persona_config,
     setup,
@@ -22,7 +22,7 @@ from plugin_voice import (
 )
 from plugin_voice.persona_config import PersonaConfigError
 
-from tests.conftest import FakeRT  # noqa: E402 — shared fake, autouse-patched
+from tests.conftest import FakeLive  # noqa: E402 — shared fake, autouse-patched
 
 API = "/api/p/plugin-voice"
 
@@ -92,12 +92,12 @@ def test_stale_050_dropped_fields_in_stored_overrides_are_ignored():
 
 async def _prewire(ctx, overrides: dict | None = None):
     """A connected install with a persona snapshot in settings."""
-    await ctx.vault.store_credential(VAULT_OPENAI_KEY, "sk_test_not_real", kind="api_key")
+    await ctx.vault.store_credential(VAULT_GEMINI_KEY, "gk_test_not_real", kind="api_key")
     settings = {
         "persona_name": "Nova",
         "greeting": "Hi, Nova here!",
         "fillers": ["On it... "],
-        "rt_voice": "cedar",
+        "rt_voice": "Kore",
     }
     if overrides:
         settings[persona_config.OVERRIDES_KEY] = overrides
@@ -112,7 +112,7 @@ def test_get_persona_settings_shape(client, ctx):
     assert data["overrides"] == {}
     assert data["defaults"]["turn_eagerness"] == "patient"
     assert data["persona_name"] == "Nova"
-    assert data["rt_voice"] == "cedar"
+    assert data["rt_voice"] == "Kore"
     assert set(data["turn_eagerness_values"]) == {"eager", "normal", "patient"}
 
 
@@ -155,36 +155,39 @@ def test_persona_ui_page_served(client):
 def _mint(client):
     resp = client.get(f"{API}/rt/session")
     assert resp.status_code == 200, resp.text
-    assert FakeRT.minted, "no session config was minted"
-    return FakeRT.minted[-1]
+    assert FakeLive.minted, "no setup was minted"
+    return FakeLive.minted[-1]["setup"]
 
 
 def test_custom_voice_prompt_reaches_talker_instructions(client, ctx):
     anyio.run(_prewire, ctx, {"voice_system_prompt": "Talk like a pirate."})
     session = _mint(client)
-    assert "Talk like a pirate." in session["instructions"]
-    assert talker.VOICE_STYLE not in session["instructions"]  # replaced, not appended
+    text = session["systemInstruction"]["parts"][0]["text"]
+    assert "Talk like a pirate." in text
+    assert talker.VOICE_STYLE not in text  # replaced, not appended
 
 
 def test_talker_extra_lands_last_in_instructions(client, ctx):
     anyio.run(_prewire, ctx, {"talker_extra": "Always answer in French."})
     session = _mint(client)
-    assert session["instructions"].rstrip().endswith("Always answer in French.")
+    text = session["systemInstruction"]["parts"][0]["text"]
+    assert text.rstrip().endswith("Always answer in French.")
 
 
 def test_turn_eagerness_override_maps_to_semantic_vad(client, ctx):
     anyio.run(_prewire, ctx, {"turn_eagerness": "eager"})
     session = _mint(client)
-    vad = session["audio"]["input"]["turn_detection"]
-    assert vad["type"] == "semantic_vad"
-    assert vad["eagerness"] == "high"
+    vad = session["realtimeInputConfig"]["automaticActivityDetection"]
+    assert vad["startOfSpeechSensitivity"] == "START_SENSITIVITY_HIGH"
+    assert vad["silenceDurationMs"] == 450
 
 
 def test_greeting_override_reaches_instructions(client, ctx):
     anyio.run(_prewire, ctx, {"greeting": "Owner greeting."})
     session = _mint(client)
-    assert "Owner greeting." in session["instructions"]
-    assert "Hi, Nova here!" not in session["instructions"]
+    text = session["systemInstruction"]["parts"][0]["text"]
+    assert "Owner greeting." in text
+    assert "Hi, Nova here!" not in text
 
 
 # -------------------------------------------------- live identity + resync
@@ -221,7 +224,7 @@ def test_session_uses_live_name_after_rename(client, ctx):
     resp = client.get(f"{API}/rt/session")
     assert resp.status_code == 200
     assert resp.json()["persona_name"] == "Rayla"
-    assert "the live voice of Rayla" in FakeRT.minted[-1]["instructions"]
+    assert "the live voice of Rayla" in FakeLive.minted[-1]["setup"]["systemInstruction"]["parts"][0]["text"]
 
 
 def test_refresh_persona_route_updates_snapshot(client, ctx):
@@ -259,7 +262,7 @@ def test_resync_persona_keeps_owner_overrides(ctx):
     anyio.run(scenario)
     stored = json.loads(ctx.vault.data[VAULT_SETTINGS])
     assert stored["persona_name"] == "Rayla"             # snapshot converges
-    assert stored["rt_voice"] == "cedar"                 # explicit pick kept
+    assert stored["rt_voice"] == "Kore"                  # explicit pick kept
     assert stored[persona_config.OVERRIDES_KEY]["greeting"] == "Owner greeting."
     # and the merge still favors the owner:
     assert persona_config.effective(stored)["greeting"] == "Owner greeting."

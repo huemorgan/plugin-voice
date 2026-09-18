@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from plugin_voice import VAULT_OPENAI_KEY, tasks
+from plugin_voice import VAULT_GEMINI_KEY, tasks
 from plugin_voice.tasks import TaskManager
 
 
@@ -169,29 +169,20 @@ def test_events_replay_and_seq_monotonic(ctx):
 # ------------------------------------------------------------------ routes
 
 
-class FakeRT:
-    def __init__(self, api_key=None, **kw): ...
-
-    async def mint_client_secret(self, session):
-        FakeRT.last_session = session
-        return {"value": "ek_test", "expires_at": 42, "session": session}
-
-    async def close(self): ...
-
-
 @pytest.fixture()
-def rt_token(client, ctx, monkeypatch):
-    from plugin_voice import openai_realtime
-
-    monkeypatch.setattr(openai_realtime, "RealtimeClient", FakeRT)
-    ctx.vault.data[VAULT_OPENAI_KEY] = "sk-own"
+def rt_token(client, ctx):
+    # minting is faked by conftest's autouse GeminiLiveClient patch
+    ctx.vault.data[VAULT_GEMINI_KEY] = "gk-own"
     return client.get("/api/p/plugin-voice/rt/session").json()["rt_token"]
 
 
 def test_session_includes_synthetic_tools(client, ctx, rt_token):
+    from tests.conftest import FakeLive
+
     data = client.get("/api/p/plugin-voice/rt/session").json()
     assert "luna_do" in data["tool_names"] and "luna_task_status" in data["tool_names"]
-    names = [t["name"] for t in FakeRT.last_session["tools"]]
+    decls = FakeLive.minted[-1]["setup"]["tools"][0]["functionDeclarations"]
+    names = [d["name"] for d in decls]
     assert "luna_do" in names and "get_weather" in names
 
 
